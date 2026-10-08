@@ -102,3 +102,45 @@ export function createHttpTransport(baseUrl = ''): Transport {
     },
   };
 }
+
+/**
+ * Wraps a transport with a switch that pretends the network is gone.
+ *
+ * This exists so the offline behaviour can be demonstrated from inside the app
+ * itself, without asking anyone to find the throttling dropdown in devtools or
+ * walk into a lift. It fails the same way a real outage does: an OfflineError
+ * before anything reaches the server.
+ */
+export interface ToggleableTransport extends Transport {
+  readonly simulatedOffline: boolean;
+  setSimulatedOffline(value: boolean): void;
+}
+
+export function createToggleableTransport(inner: Transport): ToggleableTransport {
+  let offline = false;
+
+  const guard = () => {
+    if (offline) throw new OfflineError('simulated offline');
+  };
+
+  return {
+    get simulatedOffline() {
+      return offline;
+    },
+    setSimulatedOffline(value: boolean) {
+      offline = value;
+    },
+    async push(deviceId, ops) {
+      guard();
+      return inner.push(deviceId, ops);
+    },
+    async pull(since, limit) {
+      guard();
+      return inner.pull(since, limit);
+    },
+    async health() {
+      if (offline) return false;
+      return inner.health();
+    },
+  };
+}
