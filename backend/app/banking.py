@@ -20,6 +20,13 @@ What one Plaid transaction does:
 Only money going out is imported. Income, refunds and moves between your own
 accounts are skipped, and so are credit card payments - the purchases on the
 card are already in the ledger, so the payment would count them twice.
+
+A move between your own accounts is spotted three ways (see ``_Transfers``):
+Plaid calls it a transfer; it matches a transfer rule you made ("charges
+described like this are me moving money"); or the same amount leaves one of
+your connected accounts and arrives in another within ``TRANSFER_WINDOW_DAYS``,
+and one side reads like a transfer. Spotted late - the money arriving after the
+charge was imported - the imported entry is deleted.
 """
 
 from __future__ import annotations
@@ -36,13 +43,14 @@ from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import BankItem, BankTransaction, Entry, EntryChange
+from .models import BankItem, BankSeen, BankTransaction, Entry, EntryChange, TransferRule
 from .plaid import PlaidClient, PlaidError
 from .schemas import Op
 from .sync import apply_push, utc_now
 
 BANK_DEVICE = "bank"
 MATCH_WINDOW_DAYS = 3
+TRANSFER_WINDOW_DAYS = 4
 
 # Plaid's personal_finance_category values that aren't spending.
 SKIPPED_PRIMARY = {"INCOME", "TRANSFER_IN", "TRANSFER_OUT"}
@@ -197,6 +205,115 @@ def _person_chose_category(session: Session, user_id: str, entry_id: str) -> boo
     return any(device != BANK_DEVICE and "category" in (fields or []) for device, fields in rows)
 
 
+# -- moves between your own accounts --------------------------------------------
+
+# Words a bank uses for moving money: "INTERAC E-TRANSFER", "TFR TO", "TRF".
+_TRANSFER_WORDS = {"transfer", "transfers", "tfr", "trf", "interac", "etransfer"}
+
+
+def text_key(name: str) -> str:
+    """Lowercased letters only: "E-TRANSFER 0042 SEND" and "e-Transfer send" read alike."""
+    return re.sub(r"[^a-z]+", " ", name.lower()).strip()
+
+
+def txn_text(txn: dict) -> str:
+    return text_key(f"{txn.get('name') or ''} {txn.get('merchant_name') or ''}")[:200]
+
+
+def _reads_like_transfer(text: str, category: str) -> bool:
+    return category.startswith("TRANSFER") or bool(_TRANSFER_WORDS & set(text.split()))
+
+
+class _Transfers:
+    """Decides whether a transaction is just money moving between your own accounts."""
+
+    def __init__(self, session: Session, user_id: str):
+        self.session = session
+        self.user_id = user_id
+        self.patterns = [
+            rule.pattern
+            for rule in session.execute(
+                select(TransferRule).where(TransferRule.user_id == user_id)
+            ).scalars()
+            if rule.pattern
+        ]
+
+    def by_rule(self, text: str) -> bool:
+        return any(pattern in text for pattern in self.patterns)
+
+    def counterparts(self, txn: dict) -> list[BankSeen]:
+        """Seen transactions on your other accounts for the same money going the other way."""
+        amount = cents(txn)
+        day = date.fromisoformat(spent_on(txn))
+        text = txn_text(txn)
+        category = (txn.get("personal_finance_category") or {}).get("primary", "")
+        rows = self.session.execute(
+            select(BankSeen).where(BankSeen.user_id == self.user_id, BankSeen.amount_cents == -amount)
+        ).scalars()
+        return [
+            row
+            for row in rows
+            if row.account_id != txn.get("account_id")
+            and abs((date.fromisoformat(row.on) - day).days) <= TRANSFER_WINDOW_DAYS
+            and (_reads_like_transfer(text, category) or _reads_like_transfer(row.text, row.category))
+        ]
+
+    def is_transfer_out(self, txn: dict) -> bool:
+        return cents(txn) > 0 and (self.by_rule(txn_text(txn)) or bool(self.counterparts(txn)))
+
+
+def _remember_seen(session: Session, item: BankItem, upserts: list[dict], removed_ids: list[str]) -> None:
+    for txn in upserts:
+        session.merge(BankSeen(
+            user_id=item.user_id,
+            transaction_id=txn["transaction_id"],
+            item_id=item.item_id,
+            account_id=txn.get("account_id") or "",
+            amount_cents=cents(txn),
+            on=spent_on(txn),
+            text=txn_text(txn),
+            category=(txn.get("personal_finance_category") or {}).get("primary", "")[:64],
+        ))
+    for tid in removed_ids:
+        row = session.get(BankSeen, (item.user_id, tid))
+        if row is not None:
+            session.delete(row)
+    session.flush()
+
+
+def _delete_imported(session: Session, user_id: str, link: BankTransaction, op_prefix: str) -> Op | None:
+    """The op that takes an imported entry back out of the ledger, if it's still there."""
+    if link.matched:
+        return None  # typed in by hand: theirs to delete
+    entry = session.get(Entry, (user_id, link.entry_id))
+    if entry is None or entry.deleted:
+        return None
+    return Op(op_id=_short_id(f"{op_prefix}{entry.rev}-", link.transaction_id),
+              entry_id=entry.id, kind="delete", base_rev=entry.rev)
+
+
+def apply_transfer_rule(session: Session, user_id: str, pattern: str) -> int:
+    """Take out every imported expense the new rule covers. Returns how many."""
+    ops: list[Op] = []
+    links = session.execute(
+        select(BankTransaction).where(BankTransaction.user_id == user_id)
+    ).scalars().all()
+    for link in links:
+        seen = session.get(BankSeen, (user_id, link.transaction_id))
+        if seen is not None:
+            text = seen.text
+        else:
+            # Imported before descriptions were kept: the merchant is what there is.
+            entry = session.get(Entry, (user_id, link.entry_id))
+            text = text_key((entry.fields or {}).get("merchant", "")) if entry else ""
+        if pattern and pattern in text:
+            op = _delete_imported(session, user_id, link, "px")
+            if op is not None:
+                ops.append(op)
+    apply_push(session, user_id, BANK_DEVICE, ops)
+    return len(ops)
+
+
 # -- one page of /transactions/sync ---------------------------------------------
 
 
@@ -215,8 +332,10 @@ def apply_page(
     """
     user_id = item.user_id
     now = utc_now()
-    counts = {"added": 0, "matched": 0, "updated": 0, "removed": 0}
+    counts = {"added": 0, "matched": 0, "updated": 0, "removed": 0, "transfers": 0}
     ops: list[Op] = []
+    transfers = _Transfers(session, user_id)
+    _remember_seen(session, item, upserts, removed_ids)
 
     wanted = [t["transaction_id"] for t in upserts] + [
         t.get("pending_transaction_id") for t in upserts if t.get("pending_transaction_id")
@@ -251,6 +370,12 @@ def apply_page(
             link.pending = bool(txn.get("pending"))
             if link.matched:
                 continue  # typed in by hand: their amount and date stand
+            if transfers.is_transfer_out(txn):
+                op = _delete_imported(session, user_id, link, "pt")
+                if op is not None:
+                    ops.append(op)
+                    counts["transfers"] += 1
+                continue
             entry = session.get(Entry, (user_id, link.entry_id))
             if entry is None or entry.deleted:
                 continue
@@ -272,7 +397,20 @@ def apply_page(
                 counts["updated"] += 1
             continue
 
+        if cents(txn) < 0:
+            # Money arriving. If the same amount left another of your accounts,
+            # that charge was a transfer, not spending.
+            for row in transfers.counterparts(txn):
+                link_out = session.get(BankTransaction, (user_id, row.transaction_id))
+                op = _delete_imported(session, user_id, link_out, "pt") if link_out else None
+                if op is not None and all(o.op_id != op.op_id for o in ops):
+                    ops.append(op)
+                    counts["transfers"] += 1
+            continue
         if not is_spending(txn):
+            continue
+        if transfers.is_transfer_out(txn):
+            counts["transfers"] += 1
             continue
         fields = fields_for(txn, account_label(item, txn.get("account_id", "")))
         match = candidates.take(fields["amount_cents"], fields["occurred_on"])
@@ -401,7 +539,7 @@ def sync_item(
     transactions make no new entries, but pick up anything the import now does
     differently - a finer category, say.
     """
-    totals = {"added": 0, "matched": 0, "updated": 0, "removed": 0}
+    totals = {"added": 0, "matched": 0, "updated": 0, "removed": 0, "transfers": 0}
     candidates = _Candidates(session, item.user_id)
     access_token = unseal(item.access_token)
     cursor = None if from_start else item.cursor

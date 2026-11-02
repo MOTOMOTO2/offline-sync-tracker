@@ -8,16 +8,19 @@ import { announceBankChange, bankStatus, refreshBanks, type Imported } from '../
  * front, then pull the ledger if anything came in. Mounted once for the whole
  * signed-in app, so it runs whichever tab is showing.
  *
- * Also re-reads each bank's history once, so transactions imported before the
- * finer categories existed get sorted into them.
+ * Also re-reads each bank's history once whenever the import learns something
+ * new (finer categories, spotting transfers), so earlier imports get it too.
  */
 
 // Opening the app twice in a minute shouldn't ask the bank twice.
 const REFRESH_EVERY_MS = 2 * 60_000;
-const RESORT_VERSION = 'categories-v2';
+// Bumped when the import learns something earlier imports should get too.
+const RESORT_VERSION = 'transfers-v1';
 
 export function changedAnything(imported: Imported | null): boolean {
-  return Boolean(imported && imported.added + imported.matched + imported.updated + imported.removed > 0);
+  if (!imported) return false;
+  const { added, matched, updated, removed, transfers = 0 } = imported;
+  return added + matched + updated + removed + transfers > 0;
 }
 
 function resortedKey(userId: string): string {

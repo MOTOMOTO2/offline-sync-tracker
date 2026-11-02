@@ -105,6 +105,12 @@ usual. The rules are in `backend/app/banking.py`:
 - **Subscriptions** come from Plaid's recurring-transactions product when the
   account has it, and otherwise from the ledger itself: the same merchant at
   a steady price and gap.
+- **Moving your own money isn't spending.** Besides what Plaid labels a
+  transfer, money that leaves one connected account and arrives in another
+  (same amount, within 4 days, one side reading like a transfer) is left out,
+  and taken back out if it was imported before the other side arrived. For
+  accounts that aren't connected, marking one bank expense as a transfer makes
+  a rule from the bank's description: it, its look-alikes and future ones go.
 - **Balances** (the Money tab) are the ones Plaid sends with each sync. A
   credit card or loan's balance counts as owed, anything else as yours.
 
@@ -184,7 +190,7 @@ python tools/check_all.py      # everything below, in order
 
 | Suite | Count | Covers |
 | --- | --- | --- |
-| `cd backend && pytest` | 76 | the protocol, every conflict path, idempotency, two-device stories, keeping accounts apart, bank import and webhooks |
+| `cd backend && pytest` | 81 | the protocol, every conflict path, idempotency, two-device stories, keeping accounts apart, bank import and webhooks |
 | `cd frontend && npm test` | 39 | the client engine: queueing, restart durability, lost responses, compaction, resolution |
 | `python tools/smoke_test.py` | 34 | a real uvicorn process over HTTP: app shell, SPA fallback, SW and manifest headers, asset caching, push/pull |
 | `node tools/browser_check.mjs` | 34 | real Chromium: SW install, installability, offline cold start, conflict resolution end to end |

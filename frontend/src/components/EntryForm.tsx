@@ -1,6 +1,7 @@
 import { useState } from 'react';
 
 import { engine } from '../engine';
+import { announceBankChange, markAsTransfer } from '../lib/bank';
 import { CATEGORIES } from '../lib/fields';
 import { parseMoney, todayISO } from '../lib/format';
 import type { Fields, LocalEntry } from '../lib/types';
@@ -31,6 +32,32 @@ export function EntryForm({ entry, onDone }: Props) {
   const [occurredOn, setOccurredOn] = useState(entry?.fields.occurred_on ?? todayISO());
   const [note, setNote] = useState(entry?.fields.note ?? '');
   const [error, setError] = useState<string | null>(null);
+
+  const [moving, setMoving] = useState(false);
+
+  const markTransfer = async () => {
+    if (!entry) return;
+    if (
+      !window.confirm(
+        'Treat this as moving money between your own accounts? It comes out of your spending, ' +
+          'along with every other bank charge described the same way, and future ones won’t be added.',
+      )
+    ) {
+      return;
+    }
+    setMoving(true);
+    setError(null);
+    try {
+      await markAsTransfer(entry.id);
+      void engine.sync();
+      announceBankChange();
+      onDone?.();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not reach the server.');
+    } finally {
+      setMoving(false);
+    }
+  };
 
   const reset = () => {
     setAmount('');
@@ -142,6 +169,17 @@ export function EntryForm({ entry, onDone }: Props) {
           </button>
         )}
       </div>
+
+      {entry?.fields.bank && !entry.isNew && (
+        <button
+          type="button"
+          className="link transfer-link"
+          disabled={moving}
+          onClick={() => void markTransfer()}
+        >
+          {moving ? 'Taking it out…' : 'Not spending: I moved this to my own account'}
+        </button>
+      )}
     </form>
   );
 }

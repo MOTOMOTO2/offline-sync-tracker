@@ -145,6 +145,40 @@ class BankTransaction(Base):
     at: Mapped[str] = mapped_column(String(32), nullable=False)
 
 
+class BankSeen(Base):
+    """Every transaction a bank has sent, imported or not - money in included.
+
+    This is what transfers between your own accounts are spotted from: money
+    leaving one account and the same amount arriving in another. ``amount_cents``
+    keeps Plaid's sign, positive for money out.
+    """
+
+    __tablename__ = "bank_seen"
+    __table_args__ = (Index("ix_bank_seen_amount", "user_id", "amount_cents"),)
+
+    user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    transaction_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    item_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    amount_cents: Mapped[int] = mapped_column(Integer, nullable=False)
+    on: Mapped[str] = mapped_column(String(10), nullable=False)
+    # The bank's own description, lowercased letters only (see banking.text_key).
+    text: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    category: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+
+
+class TransferRule(Base):
+    """"Charges described like this are me moving my own money": never spending."""
+
+    __tablename__ = "transfer_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    pattern: Mapped[str] = mapped_column(String(200), nullable=False)
+    label: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    created_at: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
 class ServerNote(Base):
     """Free-form key/value slot used by the demo endpoints and health checks."""
 

@@ -27,17 +27,22 @@ from sqlalchemy.orm import Session
 
 from .auth import UserDep
 from .banking import (
+    BANK_DEVICE,
     BankNotConfigured,
+    apply_transfer_rule,
     balance_sheet,
     detect_recurring,
     plaid_recurring,
     seal,
     sync_item,
+    text_key,
     unseal,
 )
 from .db import get_session
-from .models import BankItem, BankTransaction, Entry
+from .models import BankItem, BankSeen, BankTransaction, Entry, TransferRule
 from .plaid import PlaidClient, PlaidError, client_from_env
+from .schemas import Op
+from .sync import apply_push
 from .sync import utc_now
 
 log = logging.getLogger("tally.bank")
@@ -191,7 +196,7 @@ def refresh(
 
     ``from_start`` re-reads each bank's whole history (see ``sync_item``).
     """
-    totals = {"added": 0, "matched": 0, "updated": 0, "removed": 0}
+    totals = {"added": 0, "matched": 0, "updated": 0, "removed": 0, "transfers": 0}
     now = utc_now()
     for item in _items(session, user_id):
         if item.status == "revoked":
@@ -219,6 +224,75 @@ def _seconds_between(earlier: str, later: str) -> float:
 def balances(session: SessionDep, user_id: UserDep) -> dict:
     """What you have and what you owe, from each bank's last sync."""
     return balance_sheet([item for item in _items(session, user_id) if item.status != "revoked"])
+
+
+def _rule_view(rule: TransferRule) -> dict:
+    return {"id": rule.id, "label": rule.label, "pattern": rule.pattern, "created_at": rule.created_at}
+
+
+@router.get("/transfer-rules")
+def transfer_rules(session: SessionDep, user_id: UserDep) -> dict:
+    rules = session.execute(
+        select(TransferRule).where(TransferRule.user_id == user_id).order_by(TransferRule.id)
+    ).scalars()
+    return {"rules": [_rule_view(rule) for rule in rules]}
+
+
+@router.post("/transfer-rules")
+def add_transfer_rule(
+    session: SessionDep,
+    user_id: UserDep,
+    entry_id: Annotated[str, Body(embed=True, min_length=1, max_length=64)],
+) -> dict:
+    """"This expense is me moving my own money": it goes, and so does everything described like it.
+
+    The rule is the bank's own description of the expense, so later ones that
+    read the same are never imported.
+    """
+    entry = session.get(Entry, (user_id, entry_id))
+    if entry is None:
+        raise HTTPException(status_code=404, detail="unknown entry")
+    link = session.execute(
+        select(BankTransaction).where(
+            BankTransaction.user_id == user_id, BankTransaction.entry_id == entry_id
+        )
+    ).scalars().first()
+    seen = session.get(BankSeen, (user_id, link.transaction_id)) if link else None
+    merchant = (entry.fields or {}).get("merchant", "")
+    pattern = seen.text if seen and seen.text else text_key(merchant)
+    if not pattern:
+        raise HTTPException(status_code=422, detail="this expense has no description to go by")
+
+    rule = session.execute(
+        select(TransferRule).where(TransferRule.user_id == user_id, TransferRule.pattern == pattern)
+    ).scalars().first()
+    if rule is None:
+        rule = TransferRule(user_id=user_id, pattern=pattern, label=(merchant or pattern)[:80],
+                            created_at=utc_now())
+        session.add(rule)
+        session.flush()
+    removed = apply_transfer_rule(session, user_id, pattern)
+
+    # The one they pointed at goes even if they'd typed it in themselves.
+    session.refresh(entry)
+    if not entry.deleted:
+        apply_push(session, user_id, BANK_DEVICE, [Op(
+            op_id=f"px-{entry.id}-{entry.rev}"[:64], entry_id=entry.id, kind="delete", base_rev=entry.rev,
+        )])
+        removed += 1
+    session.commit()
+    return {"rule": _rule_view(rule), "removed": removed}
+
+
+@router.delete("/transfer-rules/{rule_id}")
+def remove_transfer_rule(session: SessionDep, user_id: UserDep, rule_id: int) -> dict:
+    """Stop treating these as transfers from now on. What was taken out stays out."""
+    rule = session.get(TransferRule, rule_id)
+    if rule is None or rule.user_id != user_id:
+        raise HTTPException(status_code=404, detail="no such rule")
+    session.delete(rule)
+    session.commit()
+    return {"removed": rule_id}
 
 
 @router.delete("/items/{item_id}")

@@ -2,6 +2,7 @@ import { useBankData } from '../hooks/useBankData';
 import { fetchBalances, type Account, type Balances } from '../lib/bank';
 import { formatMoney, formatMoneyWhole } from '../lib/format';
 import { Banks } from './Banks';
+import { TransferRules } from './TransferRules';
 
 /**
  * What you have against what you owe, from every connected account's balance
@@ -157,6 +158,8 @@ export function MoneyView({ userId }: { userId: string }) {
           </ul>
         </section>
       ))}
+
+      <TransferRules />
 
       <Banks />
     </div>

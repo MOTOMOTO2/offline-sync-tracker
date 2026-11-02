@@ -1353,3 +1353,10 @@ button.icon {
 .footnote {
   margin: 0 4px;
 }
+
+button.link.transfer-link {
+  align-self: flex-start;
+  min-height: 36px;
+  font-size: 0.82rem;
+  color: var(--muted);
+}

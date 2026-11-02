@@ -34,6 +34,8 @@ export interface Imported {
   matched: number;
   updated: number;
   removed: number;
+  /** Moves between your own accounts left out (or taken back out). */
+  transfers: number;
 }
 
 export interface RecurringStream {
@@ -99,6 +101,21 @@ export interface Balances {
 }
 
 export const fetchBalances = () => api<Balances>('balances');
+
+export interface TransferRule {
+  id: number;
+  label: string;
+  pattern: string;
+  created_at: string;
+}
+
+export const fetchTransferRules = () => api<{ rules: TransferRule[] }>('transfer-rules');
+
+/** "This expense is me moving my own money": it and everything described like it go. */
+export const markAsTransfer = (entryId: string) =>
+  api<{ rule: TransferRule; removed: number }>('transfer-rules', 'POST', { entry_id: entryId });
+
+export const removeTransferRule = (id: number) => api<{ removed: number }>(`transfer-rules/${id}`, 'DELETE');
 
 /**
  * "The bank data changed": a bank was connected or removed, or a refresh

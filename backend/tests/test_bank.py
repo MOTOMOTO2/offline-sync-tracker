@@ -162,7 +162,7 @@ def test_connecting_imports_spending_and_skips_everything_else(client, plaid, ph
     ])
     body = connect(client)
 
-    assert body["imported"] == {"added": 2, "matched": 0, "updated": 0, "removed": 0}
+    assert body["imported"] == {"added": 2, "matched": 0, "updated": 0, "removed": 0, "transfers": 0}
     assert body["item"]["institution"] == "Chase"
     assert body["item"]["accounts"] == [{"name": "Checking", "mask": "1234", "subtype": "checking"}]
 
@@ -227,7 +227,7 @@ def test_a_pending_charge_posting_keeps_the_entry_and_its_edits(client, plaid, p
     # The tip goes on when it posts: a new id, pointing back at the pending one.
     plaid.queue(added=[txn("t1", 48.0, "2026-10-10", merchant="Bistro", pending_id="p1",
                            primary="FOOD_AND_DRINK")], removed=["p1"])
-    assert refresh(client) == {"added": 0, "matched": 0, "updated": 1, "removed": 0}
+    assert refresh(client) == {"added": 0, "matched": 0, "updated": 1, "removed": 0, "transfers": 0}
 
     entries = live(phone.pull())
     assert set(entries) == {"plaid-p1"}
@@ -273,7 +273,7 @@ def test_running_the_same_page_twice_changes_nothing(client, plaid, phone):
     first = phone.pull()
 
     plaid.queue(added=page)  # a sync that died before saving its cursor, retried
-    assert refresh(client) == {"added": 0, "matched": 0, "updated": 0, "removed": 0}
+    assert refresh(client) == {"added": 0, "matched": 0, "updated": 0, "removed": 0, "transfers": 0}
     assert phone.pull() == []
     assert len(first) == 2
 
@@ -312,7 +312,7 @@ def test_accounts_never_see_each_others_banks(client, plaid):
 def test_bank_charges_only_match_your_own_expenses(client, plaid):
     Device(client, "b-phone", USER_B).create("coffee", occurred_on="2026-10-05", amount_cents=450)
     plaid.queue(added=[txn("t1", 4.5, "2026-10-05")])
-    assert connect(client)["imported"] == {"added": 1, "matched": 0, "updated": 0, "removed": 0}
+    assert connect(client)["imported"] == {"added": 1, "matched": 0, "updated": 0, "removed": 0, "transfers": 0}
 
 
 def test_disconnecting_keeps_the_expenses(client, plaid, phone):
@@ -487,3 +487,77 @@ def test_reading_from_the_start_resorts_categories_nobody_chose(client, plaid, p
     entries = live(phone.pull())
     assert entries["plaid-t1"]["fields"]["category"] == "shopping"
     assert entries["plaid-t2"]["fields"]["category"] == "health"
+
+
+# -- moving money between your own accounts -----------------------------------------
+
+
+def etransfer_out(tid, amount, day, account="acc-1"):
+    return txn(tid, amount, day, merchant="", account=account, primary="GENERAL_SERVICES") | {
+        "merchant_name": None, "name": "INTERAC E-TRANSFER SEND"}
+
+
+def deposit_in(tid, amount, day, account="ws-1"):
+    return txn(tid, -amount, day, merchant="", account=account, primary="TRANSFER_IN") | {
+        "merchant_name": None, "name": "E-Transfer received"}
+
+
+def test_money_moved_to_another_of_your_accounts_is_not_spending(client, plaid, phone):
+    plaid.queue(added=[etransfer_out("out1", 500.0, "2026-10-10"), deposit_in("in1", 500.0, "2026-10-10"),
+                       txn("t1", 12.0, "2026-10-10")])
+    imported = connect(client)["imported"]
+    assert (imported["added"], imported["transfers"]) == (1, 1)
+    assert set(live(phone.pull())) == {"plaid-t1"}
+
+
+def test_a_transfer_spotted_when_the_money_arrives_later_is_taken_out(client, plaid, phone):
+    plaid.queue(added=[etransfer_out("out1", 500.0, "2026-10-10")])
+    connect(client)                                   # Scotiabank: looks like spending, for now
+    assert "plaid-out1" in live(phone.pull())
+
+    plaid.queue(added=[deposit_in("in1", 500.0, "2026-10-12")])
+    connect(client, public_token="pub-2", institution="Wealthsimple")
+    changes = {c["id"]: c for c in phone.pull()}
+    assert changes["plaid-out1"]["deleted"] is True
+
+
+def test_same_amount_in_without_any_sign_of_a_transfer_is_left_alone(client, plaid, phone):
+    # $50 at a shop, and a friend paying you $50 back: not a transfer.
+    plaid.queue(added=[txn("t1", 50.0, "2026-10-10", merchant="Shop"),
+                       txn("in1", -50.0, "2026-10-10", merchant="Friend", account="acc-2",
+                           primary="INCOME")])
+    connect(client)
+    assert "plaid-t1" in live(phone.pull())
+
+
+def test_marking_one_expense_a_transfer_takes_out_its_kind_and_stops_more(client, plaid, phone):
+    plaid.queue(added=[etransfer_out("out1", 200.0, "2026-10-01"), etransfer_out("out2", 300.0, "2026-10-15"),
+                       txn("t1", 9.0, "2026-10-15", merchant="Cafe")])
+    connect(client)
+    assert set(live(phone.pull())) == {"plaid-out1", "plaid-out2", "plaid-t1"}
+
+    response = client.post("/api/bank/transfer-rules", json={"entry_id": "plaid-out1"})
+    assert response.status_code == 200, response.text
+    assert response.json()["removed"] == 2
+    changes = {c["id"]: c for c in phone.pull()}
+    assert {k for k, c in changes.items() if c["deleted"]} == {"plaid-out1", "plaid-out2"}
+    assert "plaid-t1" not in changes  # the coffee stays put
+
+    plaid.queue(added=[etransfer_out("out3", 400.0, "2026-10-20")])
+    assert refresh(client)["transfers"] == 1
+    entries = {c["id"]: c for c in phone.pull()}
+    assert "plaid-out3" not in entries
+
+    rules = client.get("/api/bank/transfer-rules").json()["rules"]
+    assert [r["pattern"] for r in rules] == ["interac e transfer send"]
+    assert client.get("/api/bank/transfer-rules", headers=auth(USER_B)).json()["rules"] == []
+    assert client.delete(f"/api/bank/transfer-rules/{rules[0]['id']}", headers=auth(USER_B)).status_code == 404
+    assert client.delete(f"/api/bank/transfer-rules/{rules[0]['id']}").status_code == 200
+
+
+def test_a_typed_in_expense_marked_as_a_transfer_goes_too(client, plaid, phone):
+    phone.create("ws", occurred_on="2026-10-01", amount_cents=10000, merchant="Wealthsimple")
+    response = client.post("/api/bank/transfer-rules", json={"entry_id": "ws"})
+    assert response.status_code == 200
+    changes = {c["id"]: c for c in phone.pull()}
+    assert changes["ws"]["deleted"] is True
