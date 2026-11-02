@@ -64,6 +64,11 @@ function EntryRow({ entry }: { entry: LocalEntry }) {
             {entry.fields.category}
             {entry.fields.note ? ` - ${entry.fields.note}` : ''}
           </small>
+          {entry.fields.bank && (
+            <small className="entry-bank" title="Seen on your bank statement">
+              {entry.fields.bank}
+            </small>
+          )}
         </span>
         <span className="entry-right">
           <span className="entry-amount">{formatMoney(entry.fields.amount_cents)}</span>

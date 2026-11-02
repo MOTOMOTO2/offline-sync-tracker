@@ -65,6 +65,7 @@ const FIELD_LABELS: Record<FieldName, string> = {
   category: 'Category',
   merchant: 'Merchant',
   note: 'Note',
+  bank: 'Bank',
 };
 
 export function fieldLabel(name: FieldName): string {

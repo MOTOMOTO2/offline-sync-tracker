@@ -102,6 +102,49 @@ class SyncState(Base):
     seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
+class BankItem(Base):
+    """One bank login connected through Plaid (an "Item" in Plaid's terms).
+
+    ``access_token`` is encrypted (see banking.py): it reads that login's
+    transactions until the Item is removed. ``cursor`` is where the next
+    /transactions/sync picks up.
+    """
+
+    __tablename__ = "bank_items"
+
+    item_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    institution: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    access_token: Mapped[str] = mapped_column(Text, nullable=False)
+    cursor: Mapped[str | None] = mapped_column(Text, nullable=True)
+    accounts: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # ok | login_required | revoked | error
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="ok")
+    status_detail: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    last_synced_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
+class BankTransaction(Base):
+    """Which entry a bank transaction became, or was matched to.
+
+    ``matched`` means the entry was typed in by hand and the bank transaction
+    was linked to it; otherwise the import created the entry. Pending
+    transactions hand their row on to the posted one that replaces them.
+    """
+
+    __tablename__ = "bank_transactions"
+    __table_args__ = (Index("ix_bank_txn_entry", "user_id", "entry_id"),)
+
+    user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    transaction_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    item_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    entry_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    matched: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    pending: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    at: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
 class ServerNote(Base):
     """Free-form key/value slot used by the demo endpoints and health checks."""
 

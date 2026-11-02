@@ -14,6 +14,7 @@ export const DEFAULT_FIELDS: Fields = {
   category: 'other',
   merchant: '',
   note: '',
+  bank: '',
 };
 
 export const CATEGORIES = [
@@ -31,6 +32,7 @@ export const MAX_LENGTHS: Partial<Record<FieldName, number>> = {
   category: 40,
   merchant: 80,
   note: 280,
+  bank: 60,
 };
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;

@@ -32,6 +32,9 @@ FIELD_SPECS: dict[str, FieldSpec] = {
     "category": FieldSpec(kind="text", default="other", max_length=40),
     "merchant": FieldSpec(kind="text", default="", max_length=80),
     "note": FieldSpec(kind="text", default="", max_length=280),
+    # Which bank account this came from or was matched to ("Chase ••1234");
+    # empty for an expense nobody's bank has seen. Written by the bank import.
+    "bank": FieldSpec(kind="text", default="", max_length=60),
 }
 
 # Offered in the UI; free text is still accepted so the list is a convenience,

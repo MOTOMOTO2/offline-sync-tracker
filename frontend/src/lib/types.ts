@@ -6,7 +6,7 @@
  * snapshot with every still-queued op replayed on top of it.
  */
 
-export const FIELD_NAMES = ['occurred_on', 'amount_cents', 'category', 'merchant', 'note'] as const;
+export const FIELD_NAMES = ['occurred_on', 'amount_cents', 'category', 'merchant', 'note', 'bank'] as const;
 export type FieldName = (typeof FIELD_NAMES)[number];
 
 export interface Fields {
@@ -15,6 +15,8 @@ export interface Fields {
   category: string;
   merchant: string;
   note: string;
+  /** The bank account this came from or was matched to. Entries from before banks were connectable don't have it. */
+  bank?: string;
 }
 
 export type FieldPatch = Partial<Fields>;

@@ -35,7 +35,7 @@ export interface Transport {
 
 const DEFAULT_TIMEOUT_MS = 12_000;
 
-async function requestJson<T>(
+export async function requestJson<T>(
   url: string,
   init: RequestInit = {},
   timeoutMs = DEFAULT_TIMEOUT_MS,

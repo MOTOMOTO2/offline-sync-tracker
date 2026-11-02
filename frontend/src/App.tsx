@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { Session } from '@supabase/supabase-js';
 
+import { Banks } from './components/Banks';
 import { ConflictList } from './components/ConflictList';
 import { DevPanel } from './components/DevPanel';
 import { EntryForm } from './components/EntryForm';
@@ -11,6 +12,7 @@ import { SyncBar } from './components/SyncBar';
 import { bootstrap, engine, forgetThisDevice } from './engine';
 import { useEngineSnapshot } from './hooks/useEngineSnapshot';
 import { authConfigured, currentSession, onSessionChange, supabase } from './lib/auth';
+import { forgetSubscriptions } from './lib/bank';
 import { formatMoney, todayISO } from './lib/format';
 import { monthTotal } from './lib/materialize';
 
@@ -54,10 +56,10 @@ function Ledger({ userId, email }: { userId: string; email: string }) {
   }, [userId]);
 
   if (!ready) return <Boot message="Opening your ledger..." />;
-  return <LedgerView email={email} />;
+  return <LedgerView userId={userId} email={email} />;
 }
 
-function LedgerView({ email }: { email: string }) {
+function LedgerView({ userId, email }: { userId: string; email: string }) {
   const snapshot = useEngineSnapshot();
 
   const signOut = async () => {
@@ -72,6 +74,7 @@ function LedgerView({ email }: { email: string }) {
       return;
     }
     await forgetThisDevice();
+    forgetSubscriptions(userId);
     // 'local' works with no signal: it ends the session on this device only.
     await supabase?.auth.signOut({ scope: 'local' });
     window.location.reload();
@@ -106,6 +109,8 @@ function LedgerView({ email }: { email: string }) {
         <section aria-label="Expenses">
           <EntryList entries={snapshot.visible} />
         </section>
+
+        <Banks userId={userId} />
 
         <DevPanel entries={snapshot.entries} />
       </main>

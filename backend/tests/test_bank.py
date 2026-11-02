@@ -1,0 +1,430 @@
+"""Bank transactions: import, matching typed-in expenses, pending charges
+posting, webhooks, and repeating charges.
+
+Plaid itself is replaced by ``FakePlaid``, which hands out scripted pages of
+/transactions/sync. Everything after that - the ops, the protocol, the pull a
+phone does - is the real thing.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import time
+from datetime import date, timedelta
+
+import jwt
+import pytest
+from cryptography.hazmat.primitives.asymmetric import ec
+
+from app.bank_api import get_plaid
+from app.banking import detect_recurring
+from app.main import app
+from app.models import Entry
+from app.plaid import PlaidClient, PlaidError
+
+from .conftest import USER_B, Device, auth
+
+os.environ["TALLY_SECRET_KEY"] = "test-key-for-sealing-bank-logins"
+
+
+def txn(tid, amount, day, *, merchant="Corner Shop", pending=False, pending_id=None,
+        primary="GENERAL_MERCHANDISE", detailed="", account="acc-1"):
+    return {
+        "transaction_id": tid,
+        "account_id": account,
+        "amount": amount,
+        "date": day,
+        "authorized_date": day,
+        "merchant_name": merchant,
+        "name": merchant.upper(),
+        "pending": pending,
+        "pending_transaction_id": pending_id,
+        "personal_finance_category": {"primary": primary, "detailed": detailed},
+    }
+
+
+class FakePlaid(PlaidClient):
+    def __init__(self):
+        super().__init__("client", "secret", "sandbox")
+        self.pages: list[dict] = []
+        self.recurring: dict | PlaidError = PlaidError("PRODUCT_NOT_ENABLED", "not enabled")
+        self.removed_items: list[str] = []
+        self.signing_key = ec.generate_private_key(ec.SECP256R1())
+        self.item_counter = 0
+
+    # Link and items
+    def link_token_create(self, user_id, **kwargs):
+        self.last_link = {"user_id": user_id, **kwargs}
+        return "link-sandbox-token"
+
+    def exchange_public_token(self, public_token):
+        self.item_counter += 1
+        return f"access-{public_token}", f"item-{public_token}"
+
+    def item_remove(self, access_token):
+        self.removed_items.append(access_token)
+
+    # Transactions
+    def queue(self, added=(), modified=(), removed=(), *, has_more=False):
+        self.pages.append({
+            "added": list(added), "modified": list(modified),
+            "removed": [{"transaction_id": t} for t in removed],
+            "accounts": [{"account_id": "acc-1", "name": "Checking", "mask": "1234",
+                          "type": "depository", "subtype": "checking"}],
+            "has_more": has_more,
+        })
+
+    def transactions_sync(self, access_token, cursor, count=250):
+        assert access_token.startswith("access-"), "token should be unsealed before use"
+        if not self.pages:
+            return {"added": [], "modified": [], "removed": [], "accounts": [],
+                    "has_more": False, "next_cursor": cursor or "c0"}
+        page = self.pages.pop(0)
+        return {**page, "next_cursor": f"c-{len(self.pages)}-{time.time_ns()}"}
+
+    def transactions_recurring_get(self, access_token):
+        if isinstance(self.recurring, PlaidError):
+            raise self.recurring
+        return self.recurring
+
+    # Webhooks, signed with our own key the way Plaid signs with theirs
+    def webhook_key(self, key_id):
+        jwk = json.loads(jwt.algorithms.ECAlgorithm.to_jwk(self.signing_key.public_key()))
+        return {**jwk, "alg": "ES256", "kid": key_id, "expired_at": None}
+
+    def sign(self, body: bytes, *, iat=None, key=None) -> str:
+        return jwt.encode(
+            {"iat": iat or int(time.time()), "request_body_sha256": hashlib.sha256(body).hexdigest()},
+            key or self.signing_key, algorithm="ES256", headers={"kid": "k1"},
+        )
+
+
+@pytest.fixture
+def plaid(client):
+    fake = FakePlaid()
+    app.dependency_overrides[get_plaid] = lambda: fake
+    yield fake
+    app.dependency_overrides.pop(get_plaid, None)
+
+
+def connect(client, public_token="pub-1", institution="Chase", headers=None):
+    response = client.post(
+        "/api/bank/exchange",
+        json={"public_token": public_token, "institution": institution},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def refresh(client, headers=None):
+    response = client.post("/api/bank/refresh", json={"force": True}, headers=headers)
+    assert response.status_code == 200, response.text
+    return response.json()["imported"]
+
+
+def live(changes):
+    return {c["id"]: c for c in changes if not c["deleted"]}
+
+
+# -- connecting ------------------------------------------------------------------
+
+
+def test_status_says_when_the_server_has_no_plaid_keys(client):
+    app.dependency_overrides[get_plaid] = lambda: None
+    try:
+        body = client.get("/api/bank/status").json()
+        assert body == {"configured": False, "environment": None, "items": []}
+        assert client.post("/api/bank/link-token", json={}).status_code == 503
+    finally:
+        app.dependency_overrides.pop(get_plaid, None)
+
+
+def test_bank_routes_need_a_sign_in(client, plaid):
+    for method, path in [("get", "/api/bank/status"), ("post", "/api/bank/refresh"),
+                         ("get", "/api/bank/subscriptions"), ("post", "/api/bank/link-token")]:
+        kwargs = {"json": {}} if method == "post" else {}
+        assert getattr(client, method)(path, headers={"Authorization": ""}, **kwargs).status_code == 401
+
+
+def test_connecting_imports_spending_and_skips_everything_else(client, plaid, phone):
+    plaid.queue(added=[
+        txn("t1", 12.5, "2026-10-01", merchant="Whole Foods", detailed="FOOD_AND_DRINK_GROCERIES",
+            primary="FOOD_AND_DRINK"),
+        txn("t2", 40.0, "2026-10-02", merchant="Uber", primary="TRANSPORTATION"),
+        txn("pay", -2000.0, "2026-10-01", merchant="Payroll", primary="INCOME"),
+        txn("cc", 300.0, "2026-10-03", merchant="Card payment", primary="LOAN_PAYMENTS",
+            detailed="LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"),
+        txn("mv", 100.0, "2026-10-03", merchant="To savings", primary="TRANSFER_OUT"),
+        txn("refund", -5.0, "2026-10-04", merchant="Amazon"),
+    ])
+    body = connect(client)
+
+    assert body["imported"] == {"added": 2, "matched": 0, "updated": 0, "removed": 0}
+    assert body["item"]["institution"] == "Chase"
+    assert body["item"]["accounts"] == [{"name": "Checking", "mask": "1234", "subtype": "checking"}]
+
+    entries = live(phone.pull())
+    assert set(entries) == {"plaid-t1", "plaid-t2"}
+    assert entries["plaid-t1"]["fields"] == {
+        "occurred_on": "2026-10-01", "amount_cents": 1250, "category": "groceries",
+        "merchant": "Whole Foods", "note": "", "bank": "Chase ••1234",
+    }
+    assert entries["plaid-t2"]["fields"]["category"] == "transport"
+    assert entries["plaid-t1"]["updated_by"] == "bank"
+
+
+def test_the_access_token_is_not_stored_in_the_clear(client, plaid):
+    connect(client)
+    from app.db import SessionLocal
+    from app.models import BankItem
+
+    with SessionLocal() as session:
+        stored = session.get(BankItem, "item-pub-1").access_token
+    assert "access-pub-1" not in stored
+
+
+def test_a_typed_in_expense_is_matched_not_doubled(client, plaid, phone):
+    phone.create("coffee", occurred_on="2026-10-05", amount_cents=450, merchant="Cafe")
+    plaid.queue(added=[txn("t1", 4.5, "2026-10-07", merchant="BLUE BOTTLE")])
+    assert connect(client)["imported"]["matched"] == 1
+
+    entries = live(phone.pull())
+    assert set(entries) == {"coffee"}
+    # Their merchant and date stand; only the bank label is added.
+    assert entries["coffee"]["fields"]["merchant"] == "Cafe"
+    assert entries["coffee"]["fields"]["occurred_on"] == "2026-10-05"
+    assert entries["coffee"]["fields"]["bank"] == "Chase ••1234"
+
+
+def test_matching_needs_the_same_amount_within_three_days(client, plaid, phone):
+    phone.create("early", occurred_on="2026-10-01", amount_cents=450)
+    phone.create("other-amount", occurred_on="2026-10-07", amount_cents=451)
+    plaid.queue(added=[txn("t1", 4.5, "2026-10-07")])
+    connect(client)
+
+    entries = live(phone.pull())
+    assert set(entries) == {"early", "other-amount", "plaid-t1"}
+    assert entries["early"]["fields"].get("bank", "") == ""
+
+
+def test_one_expense_matches_only_one_bank_charge(client, plaid, phone):
+    phone.create("coffee", occurred_on="2026-10-05", amount_cents=450)
+    plaid.queue(added=[txn("t1", 4.5, "2026-10-05"), txn("t2", 4.5, "2026-10-05")])
+    imported = connect(client)["imported"]
+    assert (imported["matched"], imported["added"]) == (1, 1)
+
+
+def test_a_pending_charge_posting_keeps_the_entry_and_its_edits(client, plaid, phone):
+    plaid.queue(added=[txn("p1", 40.0, "2026-10-10", merchant="Bistro", pending=True,
+                           primary="FOOD_AND_DRINK")])
+    connect(client)
+    entry = live(phone.pull())["plaid-p1"]
+    phone.update("plaid-p1", entry["rev"], note="team lunch")
+
+    # The tip goes on when it posts: a new id, pointing back at the pending one.
+    plaid.queue(added=[txn("t1", 48.0, "2026-10-10", merchant="Bistro", pending_id="p1",
+                           primary="FOOD_AND_DRINK")], removed=["p1"])
+    assert refresh(client) == {"added": 0, "matched": 0, "updated": 1, "removed": 0}
+
+    entries = live(phone.pull())
+    assert set(entries) == {"plaid-p1"}
+    assert entries["plaid-p1"]["fields"]["amount_cents"] == 4800
+    assert entries["plaid-p1"]["fields"]["note"] == "team lunch"
+
+
+def test_a_pending_charge_that_drops_off_goes_away(client, plaid, phone):
+    phone.create("typed", occurred_on="2026-10-10", amount_cents=999)
+    plaid.queue(added=[txn("p1", 25.0, "2026-10-10", pending=True),
+                       txn("p2", 9.99, "2026-10-10", pending=True)])
+    connect(client)
+    phone.pull()
+
+    plaid.queue(removed=["p1", "p2"])
+    assert refresh(client)["removed"] == 2
+
+    changes = {c["id"]: c for c in phone.pull()}
+    assert changes["plaid-p1"]["deleted"] is True        # imported: gone
+    assert changes["typed"]["deleted"] is False          # typed in: stays,
+    assert changes["typed"]["fields"]["bank"] == ""      # just unlinked
+
+
+def test_an_offline_edit_merges_with_a_bank_update(client, plaid, phone):
+    plaid.queue(added=[txn("p1", 40.0, "2026-10-10", pending=True)])
+    connect(client)
+    stale_rev = live(phone.pull())["plaid-p1"]["rev"]
+
+    plaid.queue(added=[txn("t1", 48.0, "2026-10-10", pending_id="p1")], removed=["p1"])
+    refresh(client)
+
+    # The phone was offline and edited the category against the old revision.
+    result = phone.update("plaid-p1", stale_rev, category="fun")
+    assert result["status"] == "merged"
+    assert result["entry"]["fields"]["amount_cents"] == 4800
+    assert result["entry"]["fields"]["category"] == "fun"
+
+
+def test_running_the_same_page_twice_changes_nothing(client, plaid, phone):
+    page = [txn("t1", 10.0, "2026-10-01"), txn("t2", 20.0, "2026-10-02")]
+    plaid.queue(added=page)
+    connect(client)
+    first = phone.pull()
+
+    plaid.queue(added=page)  # a sync that died before saving its cursor, retried
+    assert refresh(client) == {"added": 0, "matched": 0, "updated": 0, "removed": 0}
+    assert phone.pull() == []
+    assert len(first) == 2
+
+
+def test_several_pages_are_all_imported(client, plaid, phone):
+    plaid.queue(added=[txn("t1", 10.0, "2026-10-01")], has_more=True)
+    plaid.queue(added=[txn("t2", 20.0, "2026-10-02")])
+    assert connect(client)["imported"]["added"] == 2
+
+
+def test_a_broken_login_is_recorded_and_other_banks_still_refresh(client, plaid):
+    connect(client)
+
+    def broken(*_args, **_kwargs):
+        raise PlaidError("ITEM_LOGIN_REQUIRED", "the login details have changed")
+
+    plaid.transactions_sync = broken
+    refresh(client)
+    item = client.get("/api/bank/status").json()["items"][0]
+    assert item["status"] == "login_required"
+
+    # Signing back in goes through Link in update mode for that item.
+    assert client.post("/api/bank/link-token", json={"item_id": item["item_id"]}).status_code == 200
+    assert plaid.last_link["access_token"] == "access-pub-1"
+
+
+def test_accounts_never_see_each_others_banks(client, plaid):
+    connect(client)
+    other = auth(USER_B)
+    assert client.get("/api/bank/status", headers=other).json()["items"] == []
+    assert client.delete("/api/bank/items/item-pub-1", headers=other).status_code == 404
+    assert client.post("/api/bank/link-token", json={"item_id": "item-pub-1"},
+                       headers=other).status_code == 404
+
+
+def test_bank_charges_only_match_your_own_expenses(client, plaid):
+    Device(client, "b-phone", USER_B).create("coffee", occurred_on="2026-10-05", amount_cents=450)
+    plaid.queue(added=[txn("t1", 4.5, "2026-10-05")])
+    assert connect(client)["imported"] == {"added": 1, "matched": 0, "updated": 0, "removed": 0}
+
+
+def test_disconnecting_keeps_the_expenses(client, plaid, phone):
+    plaid.queue(added=[txn("t1", 10.0, "2026-10-01")])
+    connect(client)
+    assert client.delete("/api/bank/items/item-pub-1").status_code == 200
+    assert plaid.removed_items == ["access-pub-1"]
+    assert client.get("/api/bank/status").json()["items"] == []
+    assert "plaid-t1" in live(phone.pull())
+
+
+# -- webhooks --------------------------------------------------------------------
+
+
+def post_webhook(client, plaid, payload, **sign_kwargs):
+    body = json.dumps(payload).encode()
+    return client.post(
+        "/api/bank/webhook", content=body,
+        headers={"Authorization": "", "Content-Type": "application/json",
+                 "Plaid-Verification": plaid.sign(body, **sign_kwargs)},
+    )
+
+
+def test_a_signed_webhook_brings_in_new_transactions(client, plaid, phone):
+    connect(client)
+    plaid.queue(added=[txn("t9", 7.0, "2026-10-20")])
+    response = post_webhook(client, plaid, {"webhook_type": "TRANSACTIONS",
+                                            "webhook_code": "SYNC_UPDATES_AVAILABLE",
+                                            "item_id": "item-pub-1"})
+    assert response.status_code == 200
+    assert "plaid-t9" in live(phone.pull())
+
+
+def test_a_webhook_flags_a_login_that_needs_signing_in_again(client, plaid):
+    connect(client)
+    post_webhook(client, plaid, {"webhook_type": "ITEM", "webhook_code": "ERROR",
+                                 "item_id": "item-pub-1",
+                                 "error": {"error_code": "ITEM_LOGIN_REQUIRED"}})
+    assert client.get("/api/bank/status").json()["items"][0]["status"] == "login_required"
+
+
+@pytest.mark.parametrize("forgery", ["unsigned", "wrong_key", "too_old", "body_changed"])
+def test_webhooks_plaid_did_not_sign_are_refused(client, plaid, forgery):
+    connect(client)
+    payload = {"webhook_type": "ITEM", "webhook_code": "USER_PERMISSION_REVOKED",
+               "item_id": "item-pub-1"}
+    body = json.dumps(payload).encode()
+    headers = {"Authorization": "", "Content-Type": "application/json"}
+    if forgery == "wrong_key":
+        headers["Plaid-Verification"] = plaid.sign(body, key=ec.generate_private_key(ec.SECP256R1()))
+    elif forgery == "too_old":
+        headers["Plaid-Verification"] = plaid.sign(body, iat=int(time.time()) - 600)
+    elif forgery == "body_changed":
+        headers["Plaid-Verification"] = plaid.sign(b'{"something": "else"}')
+    response = client.post("/api/bank/webhook", content=body, headers=headers)
+    assert response.status_code == 401
+    assert client.get("/api/bank/status").json()["items"][0]["status"] == "ok"
+
+
+# -- repeating charges -------------------------------------------------------------
+
+
+def test_subscriptions_come_from_plaid_when_it_has_them(client, plaid):
+    connect(client)
+    plaid.recurring = {"outflow_streams": [
+        {"merchant_name": "Netflix", "frequency": "MONTHLY", "is_active": True, "status": "MATURE",
+         "last_amount": {"amount": 15.49}, "last_date": "2026-10-12",
+         "predicted_next_date": "2026-11-12",
+         "personal_finance_category": {"primary": "ENTERTAINMENT"}},
+        {"merchant_name": "Gym", "frequency": "WEEKLY", "is_active": True, "status": "MATURE",
+         "last_amount": {"amount": 10}, "last_date": "2026-10-30"},
+        {"merchant_name": "Old thing", "frequency": "MONTHLY", "is_active": False,
+         "status": "TOMBSTONED", "last_amount": {"amount": 5}, "last_date": "2025-01-01"},
+    ]}
+    body = client.get("/api/bank/subscriptions").json()
+    assert body["source"] == "plaid"
+    assert [s["merchant"] for s in body["streams"]] == ["Gym", "Netflix"]
+    assert body["streams"][1]["category"] == "fun"
+    assert body["monthly_total_cents"] == round(1000 * 52 / 12) + 1549
+
+
+def test_subscriptions_fall_back_to_the_ledger_without_plaid_recurring(client, plaid, phone):
+    connect(client)  # FakePlaid's recurring answers PRODUCT_NOT_ENABLED
+    today = date.today()
+    for months_ago in (3, 2, 1):
+        day = (today - timedelta(days=30 * months_ago)).isoformat()
+        phone.create(f"spot-{months_ago}", occurred_on=day, amount_cents=1199, merchant="Spotify")
+    body = client.get("/api/bank/subscriptions").json()
+    assert body["source"] == "history"
+    assert [(s["merchant"], s["frequency"]) for s in body["streams"]] == [("Spotify", "monthly")]
+
+
+def _entries(*charges):
+    return [
+        Entry(user_id="u", id=f"e{i}", rev=1, server_seq=i, deleted=False,
+              fields={"merchant": m, "amount_cents": a, "occurred_on": d, "category": "fun"},
+              created_at="", updated_at="", updated_by="")
+        for i, (m, a, d) in enumerate(charges)
+    ]
+
+
+def test_detection_wants_a_steady_gap_and_a_steady_price():
+    today = date(2026, 11, 2)
+    found = detect_recurring(_entries(
+        ("NETFLIX.COM 123", 1549, "2026-08-12"), ("Netflix.com", 1549, "2026-09-12"),
+        ("netflix com", 1549, "2026-10-12"),
+        # Same shop, all over the place: groceries, not a subscription.
+        ("Tesco", 4200, "2026-10-01"), ("Tesco", 1800, "2026-10-04"), ("Tesco", 6100, "2026-10-20"),
+        # Monthly, but stopped in the summer.
+        ("Old gym", 3000, "2026-05-01"), ("Old gym", 3000, "2026-06-01"),
+        ("Old gym", 3000, "2026-07-01"),
+    ), today)
+    assert [(s["merchant"], s["frequency"], s["next_date"]) for s in found] == [
+        ("netflix com", "monthly", "2026-11-11")
+    ]

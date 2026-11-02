@@ -104,6 +104,9 @@ def main() -> int:
     env = {
         **os.environ,
         "TALLY_DATABASE_URL": f"sqlite+pysqlite:///{(tmp / 'smoke.db').as_posix()}",
+        # Requests without a token run as this user; sign-in itself is covered
+        # by backend/tests/test_accounts.py.
+        "TALLY_DEV_USER": "smoke-test",
     }
 
     process = subprocess.Popen(

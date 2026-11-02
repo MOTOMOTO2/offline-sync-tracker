@@ -74,9 +74,37 @@ Vercel project:
 | `TALLY_ALLOWED_USERS` | comma-separated user ids allowed in; the Supabase project is shared with another app |
 | `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` | baked into the frontend build; public by design |
 | `VITE_ALLOW_SIGNUP` | `true` to show a sign-up option |
+| `PLAID_CLIENT_ID`, `PLAID_SECRET` | from dashboard.plaid.com; without them the Banks panel stays hidden |
+| `PLAID_ENV` | `sandbox` (test banks, the default) or `production` |
+| `TALLY_SECRET_KEY` | any long random string; encrypts stored bank logins. Changing it disconnects every bank |
+| `PLAID_REDIRECT_URI` | production only: this app's `/`, registered in the Plaid dashboard, for banks that sign in on their own site |
+| `PLAID_WEBHOOK_URL` | optional; otherwise worked out from the request |
 
 On Vercel the backend refuses to start without `TALLY_DATABASE_URL` rather than
 fall back to SQLite on a read-only disk. Then `vercel deploy --prod`.
+
+## Banks
+
+Connecting a bank goes through Plaid Link. The server keeps the login
+(encrypted) and turns new transactions into ops from a device called `bank`,
+pushed through the same protocol as a phone's: they reach every device on its
+next pull, and an offline edit made meanwhile merges with them or conflicts as
+usual. The rules are in `backend/app/banking.py`:
+
+- Only money going out comes in. Income, refunds, transfers between accounts
+  and credit card payments are skipped (the card's purchases already count).
+- A bank charge with the same amount as an expense typed in within 3 days is
+  **matched** to it: the typed-in entry gets a bank label and keeps its own
+  merchant, date and amount. Otherwise it becomes a new entry.
+- A pending charge that posts keeps its entry, so edits carry over; an
+  imported entry follows the bank's final amount (a tip, say). A pending
+  charge that drops off deletes the imported entry, or unlinks a matched one.
+- New transactions arrive by Plaid webhook (signature-checked) and on each
+  app open. That's as live as banks get: Plaid checks most of them a few
+  times a day.
+- **Subscriptions** come from Plaid's recurring-transactions product when the
+  account has it, and otherwise from the ledger itself: the same merchant at
+  a steady price and gap.
 
 ## Trying the conflict behaviour
 
@@ -149,12 +177,14 @@ python tools/check_all.py      # everything below, in order
 
 | Suite | Count | Covers |
 | --- | --- | --- |
-| `cd backend && pytest` | 48 | the protocol, every conflict path, idempotency, two-device stories, keeping accounts apart |
+| `cd backend && pytest` | 73 | the protocol, every conflict path, idempotency, two-device stories, keeping accounts apart, bank import and webhooks |
 | `cd frontend && npm test` | 39 | the client engine: queueing, restart durability, lost responses, compaction, resolution |
 | `python tools/smoke_test.py` | 34 | a real uvicorn process over HTTP: app shell, SPA fallback, SW and manifest headers, asset caching, push/pull |
 | `node tools/browser_check.mjs` | 34 | real Chromium: SW install, installability, offline cold start, conflict resolution end to end |
 
-All four pass; the counts are from an actual run, not aspirations. The browser
+The first three pass; the counts are from an actual run, not aspirations.
+The browser check predates sign-in and fails at the sign-in screen until it
+gets a test account to use. The browser
 check starts its own server, writes an expense with the network off, reloads
 *while still offline*, reconnects, watches the queue drain, then drives a
 conflict through to resolution — and produces the screenshots above. It needs
@@ -201,6 +231,8 @@ next:
 - **One ledger per account, no sharing.** Every table is keyed by `user_id`
   first, and the pull cursor is per user. Two people can't share a household
   ledger yet.
+- **Plaid is faked in the tests.** `test_bank.py` scripts Plaid's responses;
+  nothing in the suite talks to Plaid's sandbox.
 - **No migrations.** Tables are created on startup if missing; a schema change
   to an existing database has to be applied by hand.
 - **Nothing is ever purged.** Tombstones and the `entry_changes` and
