@@ -22,6 +22,7 @@ from sqlalchemy.schema import CreateSchema
 from .auth import UserDep
 from .bank_api import router as bank_router
 from .credit_api import router as credit_router
+from .notify import router as notify_router
 from .db import engine, get_session
 from .models import SCHEMA, Base, Entry
 from .schemas import (
@@ -64,6 +65,7 @@ SessionDep = Annotated[Session, Depends(get_session)]
 
 app.include_router(bank_router)
 app.include_router(credit_router)
+app.include_router(notify_router)
 
 
 def init_db() -> None:

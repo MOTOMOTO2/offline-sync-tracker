@@ -79,6 +79,9 @@ Vercel project:
 | `TALLY_SECRET_KEY` | any long random string; encrypts stored bank logins. Changing it disconnects every bank |
 | `PLAID_REDIRECT_URI` | production only: this app's `/`, registered in the Plaid dashboard, for banks that sign in on their own site |
 | `PLAID_WEBHOOK_URL` | optional; otherwise worked out from the request |
+| `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` | the notification key pair; `python tools/make_vapid_keys.py` makes one. A new pair means every device turns notifications on again |
+| `VAPID_SUBJECT` | `mailto:` an address push services can reach |
+| `CRON_SECRET` | any long random string; Vercel Cron signs the daily reminder run with it |
 
 On Vercel the backend refuses to start without `TALLY_DATABASE_URL` rather than
 fall back to SQLite on a read-only disk. Then `vercel deploy --prod`.
@@ -120,6 +123,10 @@ usual. The rules are in `backend/app/banking.py`:
   consumer's score (in Canada it's Equifax and TransUnion, with no consumer
   API), so the Money tab keeps a history of the ones you enter, next to card
   utilisation worked out from the connected cards.
+- **Notifications** (Web Push; on an iPhone only from the Home Screen):
+  the day before a subscription renews, from a once-a-day Vercel Cron at
+  14:00 UTC, and when a new bank charge matches a subscription. Each is sent
+  once; devices that have gone away are forgotten.
 - **Balances** (the Money tab) are the ones Plaid sends with each sync. A
   credit card or loan's balance counts as owed, anything else as yours.
 
@@ -199,7 +206,7 @@ python tools/check_all.py      # everything below, in order
 
 | Suite | Count | Covers |
 | --- | --- | --- |
-| `cd backend && pytest` | 96 | the protocol, every conflict path, idempotency, two-device stories, keeping accounts apart, bank import and webhooks |
+| `cd backend && pytest` | 108 | the protocol, every conflict path, idempotency, two-device stories, keeping accounts apart, bank import and webhooks |
 | `cd frontend && npm test` | 39 | the client engine: queueing, restart durability, lost responses, compaction, resolution |
 | `python tools/smoke_test.py` | 34 | a real uvicorn process over HTTP: app shell, SPA fallback, SW and manifest headers, asset caching, push/pull |
 | `node tools/browser_check.mjs` | 34 | real Chromium: SW install, installability, offline cold start, conflict resolution end to end |

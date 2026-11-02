@@ -208,6 +208,31 @@ class CreditScore(Base):
     created_at: Mapped[str] = mapped_column(String(32), nullable=False)
 
 
+class PushSubscription(Base):
+    """One device's permission to be sent notifications (the Web Push subscription)."""
+
+    __tablename__ = "push_subscriptions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    endpoint: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    p256dh: Mapped[str] = mapped_column(String(200), nullable=False)
+    auth: Mapped[str] = mapped_column(String(100), nullable=False)
+    # The device's time zone, so "renews tomorrow" means tomorrow where they are.
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="UTC")
+    created_at: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
+class NotificationSent(Base):
+    """What someone has already been told, so no reminder or charge is sent twice."""
+
+    __tablename__ = "notifications_sent"
+
+    user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    key: Mapped[str] = mapped_column(String(200), primary_key=True)
+    at: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
 class ServerNote(Base):
     """Free-form key/value slot used by the demo endpoints and health checks."""
 

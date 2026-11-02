@@ -10,6 +10,7 @@ import {
 } from '../lib/bank';
 import { formatMoney, formatMoneyWhole, todayISO } from '../lib/format';
 import { AddSubscription } from './AddSubscription';
+import { NotificationSettings } from './NotificationSettings';
 
 /**
  * Repeating charges, by when they next renew. The list comes from the server:
@@ -136,6 +137,8 @@ export function SubscriptionsView({ userId }: { userId: string }) {
       </section>
 
       {adding && <AddSubscription onClose={() => setAdding(false)} />}
+
+      <NotificationSettings />
 
       {groups.map((group) => (
         <section key={group.bucket} className="group" aria-label={group.bucket}>

@@ -43,7 +43,15 @@ from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import BankItem, BankSeen, BankTransaction, Entry, EntryChange, TransferRule
+from .models import (
+    BankItem,
+    BankSeen,
+    BankTransaction,
+    CustomSubscription,
+    Entry,
+    EntryChange,
+    TransferRule,
+)
 from .plaid import PlaidClient, PlaidError
 from .schemas import Op
 from .sync import apply_push, utc_now
@@ -354,6 +362,8 @@ def apply_page(
     ops: list[Op] = []
     transfers = _Transfers(session, user_id)
     _remember_seen(session, item, upserts, removed_ids)
+    # New charges, for telling someone a subscription just went through.
+    charges: list[tuple[str, dict[str, Any]]] = []
 
     wanted = [t["transaction_id"] for t in upserts] + [
         t.get("pending_transaction_id") for t in upserts if t.get("pending_transaction_id")
@@ -442,6 +452,7 @@ def apply_page(
                 kind="update", base_rev=match.rev, fields={"bank": fields["bank"]},
             ))
             counts["matched"] += 1
+            charges.append((tid, fields))
         else:
             link = BankTransaction(
                 user_id=user_id, transaction_id=tid, item_id=item.item_id,
@@ -452,6 +463,7 @@ def apply_page(
                 kind="create", base_rev=0, fields=fields,
             ))
             counts["added"] += 1
+            charges.append((tid, fields))
         session.add(link)
         links[tid] = link
 
@@ -473,6 +485,14 @@ def apply_page(
         counts["removed"] += 1
 
     apply_push(session, user_id, BANK_DEVICE, ops)  # commits the link rows too
+
+    if charges:
+        from .notify import notify_charges  # notify builds on this module
+
+        try:
+            notify_charges(session, user_id, charges)
+        except Exception:  # noqa: BLE001 - a failed notification never fails an import
+            session.rollback()
     return counts
 
 
@@ -735,3 +755,53 @@ def detect_recurring(entries: list[Entry], today: date | None = None) -> list[di
             last_amount, last_day.isoformat(), next_day.isoformat(), "history",
         ))
     return streams
+
+
+def custom_stream(sub: CustomSubscription) -> dict:
+    return {
+        "id": sub.id,
+        "merchant": sub.name,
+        "category": sub.category,
+        "frequency": sub.frequency,
+        "amount_cents": sub.amount_cents,
+        "monthly_cents": round(sub.amount_cents * PER_MONTH.get(sub.frequency, 0)),
+        "last_date": "",
+        "next_date": next_renewal(sub.next_date, sub.frequency),
+        "source": "manual",
+    }
+
+
+def subscription_streams(
+    session: Session, user_id: str, plaid: PlaidClient | None
+) -> tuple[str, list[dict[str, Any]]]:
+    """(source, streams): Plaid's repeating charges when it has them, else the
+    ledger's, plus the ones added by hand - which win over a found one with the
+    same name. Biggest monthly cost first."""
+    items = list(
+        session.execute(
+            select(BankItem).where(BankItem.user_id == user_id, BankItem.status != "revoked")
+        ).scalars()
+    )
+    streams = None
+    if plaid is not None and items:
+        try:
+            streams = plaid_recurring(plaid, items)
+        except (PlaidError, BankNotConfigured):
+            # Recurring transactions is a separate Plaid product, and not every
+            # account has it switched on.
+            streams = None
+    source = "plaid"
+    if streams is None:
+        entries = session.execute(
+            select(Entry).where(Entry.user_id == user_id, Entry.deleted.is_(False))
+        ).scalars()
+        streams = detect_recurring(list(entries))
+        source = "history"
+    custom = session.execute(
+        select(CustomSubscription).where(CustomSubscription.user_id == user_id)
+    ).scalars().all()
+    yours = {text_key(sub.name) for sub in custom}
+    streams = [s for s in streams if text_key(s["merchant"]) not in yours]
+    streams += [custom_stream(sub) for sub in custom]
+    streams.sort(key=lambda s: -s["monthly_cents"])
+    return source, streams

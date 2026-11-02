@@ -6,3 +6,4 @@ pydantic>=2.7
 pyjwt[crypto]>=2.9
 psycopg[binary]>=3.2
 cryptography>=42
+pywebpush>=2.0

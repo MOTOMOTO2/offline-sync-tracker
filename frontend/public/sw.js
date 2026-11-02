@@ -156,3 +156,43 @@ self.addEventListener('sync', (event) => {
     })(),
   );
 });
+
+/**
+ * Notifications: subscription reminders and charges, sent by the server with
+ * Web Push (backend/app/notify.py). Tapping one opens Tally on the tab it's
+ * about, reusing an open window when there is one.
+ */
+self.addEventListener('push', (event) => {
+  let data = {};
+  try {
+    data = event.data ? event.data.json() : {};
+  } catch {
+    data = { title: 'Tally', body: event.data ? event.data.text() : '' };
+  }
+  event.waitUntil(
+    self.registration.showNotification(data.title || 'Tally', {
+      body: data.body || '',
+      icon: '/icons/icon-192.png',
+      badge: '/icons/favicon-32.png',
+      tag: data.tag,
+      data: { url: data.url || '/' },
+    }),
+  );
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const url = new URL(event.notification.data?.url || '/', self.location.origin).href;
+  event.waitUntil(
+    (async () => {
+      const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+      for (const client of windows) {
+        if ('focus' in client) {
+          await client.navigate(url).catch(() => undefined);
+          return client.focus();
+        }
+      }
+      return self.clients.openWindow(url);
+    })(),
+  );
+});

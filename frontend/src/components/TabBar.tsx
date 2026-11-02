@@ -10,7 +10,14 @@ const TABS: Tab[] = ['expenses', 'spending', 'subscriptions', 'money'];
 const STORAGE_KEY = 'tally:tab';
 
 export function initialTab(): Tab {
-  if (new URLSearchParams(window.location.search).has('oauth_state_id')) return 'money';
+  const params = new URLSearchParams(window.location.search);
+  if (params.has('oauth_state_id')) return 'money';
+  // A notification opens the tab it's about.
+  const asked = params.get('tab') as Tab | null;
+  if (asked && TABS.includes(asked)) {
+    window.history.replaceState(null, '', window.location.pathname);
+    return asked;
+  }
   try {
     const saved = localStorage.getItem(STORAGE_KEY) as Tab | null;
     if (saved && TABS.includes(saved)) return saved;

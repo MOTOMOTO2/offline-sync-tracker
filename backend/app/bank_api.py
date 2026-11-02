@@ -30,16 +30,16 @@ from .auth import UserDep
 from .banking import (
     BANK_DEVICE,
     BankNotConfigured,
-    PER_MONTH,
     apply_transfer_rule,
     balance_sheet,
     bank_text,
+    custom_stream,
     imported_entries,
-    next_renewal,
     reads_like_transfer,
     detect_recurring,
     plaid_recurring,
     seal,
+    subscription_streams,
     sync_item,
     text_key,
     unseal,
@@ -381,20 +381,6 @@ def remove_item(session: SessionDep, user_id: UserDep, plaid: PlaidDep, item_id:
 Frequency = Literal["weekly", "biweekly", "monthly", "quarterly", "annually"]
 
 
-def _custom_stream(sub: CustomSubscription) -> dict:
-    return {
-        "id": sub.id,
-        "merchant": sub.name,
-        "category": sub.category,
-        "frequency": sub.frequency,
-        "amount_cents": sub.amount_cents,
-        "monthly_cents": round(sub.amount_cents * PER_MONTH.get(sub.frequency, 0)),
-        "last_date": "",
-        "next_date": next_renewal(sub.next_date, sub.frequency),
-        "source": "manual",
-    }
-
-
 @router.post("/subscriptions/custom")
 def add_subscription(
     session: SessionDep,
@@ -415,7 +401,7 @@ def add_subscription(
     )
     session.add(sub)
     session.commit()
-    return _custom_stream(sub)
+    return custom_stream(sub)
 
 
 @router.delete("/subscriptions/custom/{sub_id}")
@@ -435,30 +421,7 @@ def subscriptions(
     plaid: Annotated[PlaidClient | None, Depends(get_plaid)],
 ) -> dict:
     """Repeating charges: Plaid's view when it has one, else spotted in the ledger, plus any added by hand."""
-    items = [item for item in _items(session, user_id) if item.status != "revoked"]
-    streams = None
-    if plaid is not None and items:
-        try:
-            streams = plaid_recurring(plaid, items)
-        except (PlaidError, BankNotConfigured) as exc:
-            # Recurring transactions is a separate Plaid product, and not every
-            # account has it switched on.
-            log.info("recurring from plaid unavailable: %s", exc)
-    source = "plaid"
-    if streams is None:
-        entries = session.execute(
-            select(Entry).where(Entry.user_id == user_id, Entry.deleted.is_(False))
-        ).scalars()
-        streams = detect_recurring(list(entries))
-        source = "history"
-    custom = session.execute(
-        select(CustomSubscription).where(CustomSubscription.user_id == user_id)
-    ).scalars().all()
-    # Added by hand beats detected, for the same merchant.
-    yours = {text_key(sub.name) for sub in custom}
-    streams = [s for s in streams if text_key(s["merchant"]) not in yours]
-    streams += [_custom_stream(sub) for sub in custom]
-    streams.sort(key=lambda s: -s["monthly_cents"])
+    source, streams = subscription_streams(session, user_id, plaid)
     return {
         "source": source,
         "streams": streams,
