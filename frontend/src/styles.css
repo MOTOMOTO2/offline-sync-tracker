@@ -79,6 +79,18 @@ button.danger-text {
   border-color: transparent;
 }
 
+/* A button that reads as a link: "Sign out", "Create an account". The hit area
+   stays tap-sized even though the text is small. */
+button.link {
+  background: none;
+  border: 0;
+  padding: 0 4px;
+  color: var(--indigo);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  font-size: inherit;
+}
+
 code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.85em;
@@ -159,6 +171,52 @@ main {
   color: var(--muted);
   font-size: 0.78rem;
   text-align: center;
+}
+
+.app-footer .account {
+  overflow-wrap: anywhere;
+}
+
+/* ---------- sign in ---------- */
+
+.sign-in {
+  max-width: 400px;
+  margin: 0 auto;
+  min-height: 100dvh;
+  padding: calc(48px + env(safe-area-inset-top)) 16px 32px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.sign-in h1 {
+  margin: 0;
+  font-size: 1.5rem;
+}
+
+.sign-in-lede {
+  margin: 0 0 8px;
+  color: var(--muted);
+}
+
+.sign-in form {
+  width: 100%;
+}
+
+.sign-in .field {
+  font-size: 0.8rem;
+}
+
+.sign-in-switch {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.form-notice {
+  margin: 0;
+  color: var(--green);
+  font-size: 0.85rem;
 }
 
 .section-title {

@@ -76,19 +76,33 @@ async function requestJson<T>(
   return (await response.json()) as T;
 }
 
-export function createHttpTransport(baseUrl = ''): Transport {
+/**
+ * @param getToken the signed-in user's access token, asked for on every request
+ *   so a refreshed one is always what goes out. A 401 comes back as a
+ *   ServerError like any other refusal: the queue stays put, and the next sync
+ *   after signing in again sends it.
+ */
+export function createHttpTransport(
+  baseUrl = '',
+  getToken: () => Promise<string | null> = async () => null,
+): Transport {
+  const authed = async (init: RequestInit): Promise<RequestInit> => {
+    const token = await getToken();
+    return token ? { ...init, headers: { ...init.headers, Authorization: `Bearer ${token}` } } : init;
+  };
+
   return {
     async push(deviceId, ops) {
-      return requestJson<PushResponse>(`${baseUrl}/api/sync/push`, {
-        method: 'POST',
-        body: JSON.stringify({ device_id: deviceId, ops }),
-      });
+      return requestJson<PushResponse>(
+        `${baseUrl}/api/sync/push`,
+        await authed({ method: 'POST', body: JSON.stringify({ device_id: deviceId, ops }) }),
+      );
     },
 
     async pull(since, limit = 200) {
       return requestJson<PullResponse>(
         `${baseUrl}/api/sync/pull?since=${since}&limit=${limit}`,
-        { method: 'GET' },
+        await authed({ method: 'GET' }),
       );
     },
 

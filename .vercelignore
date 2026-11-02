@@ -1,0 +1,7 @@
+.venv/
+backend/data/
+backend/tests/
+frontend/node_modules/
+frontend/dist/
+screenshots/
+tools/

@@ -11,8 +11,9 @@ asked which value wins — nothing is silently overwritten.
   <img src="screenshots/synced.png" width="31%" alt="Everything synced" />
 </p>
 
-FastAPI + SQLite on the server, React + TypeScript on the device, one
-hand-written service worker. An entry is `occurred_on`, `amount_cents`,
+FastAPI on the server (SQLite locally, Supabase Postgres when hosted), React +
+TypeScript on the device, one hand-written service worker. Sign-in is Supabase
+Auth, and every row belongs to one account. An entry is `occurred_on`, `amount_cents`,
 `category`, `merchant`, `note` — amounts are integer cents, never floats.
 
 ## Running it
@@ -30,6 +31,13 @@ cd frontend && npm install && npm run build && cd ..
 
 cd backend && ../.venv/Scripts/python -m uvicorn app.main:app --port 8000
 ```
+
+The frontend needs a Supabase project to sign in against: put
+`VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` in `frontend/.env.local`
+before building, and set `SUPABASE_URL` for the backend so it can check tokens
+(plus `SUPABASE_JWT_SECRET` if the project still signs with a shared secret).
+For backend-only work, `TALLY_DEV_USER=<name>` makes every request without a
+token run as that user.
 
 Then open <http://localhost:8000>.
 
@@ -49,6 +57,26 @@ Installing on a real phone needs HTTPS — Chrome only treats plain HTTP as a
 secure context on localhost — so put it behind a tunnel (`cloudflared tunnel
 --url http://localhost:8000`) or a proxy with a certificate. The queue, the
 conflict handling and the offline shell all work fine over plain HTTP.
+
+## Deploying
+
+It runs on Vercel: `vercel.json` builds the frontend for the CDN and sends
+`/api/*` to `api/index.py`, which serves the FastAPI app as a function. Same
+origin, so the service worker still controls the page. Set these on the
+Vercel project:
+
+| Variable | What it is |
+| --- | --- |
+| `TALLY_DATABASE_URL` | Supabase Postgres, through the connection pooler |
+| `TALLY_DB_SCHEMA` | a Postgres schema of Tally's own, not exposed by Supabase's Data API |
+| `SUPABASE_URL` | for checking sign-in tokens against the project's published keys |
+| `SUPABASE_JWT_SECRET` | only for projects that still sign with a shared secret |
+| `TALLY_ALLOWED_USERS` | comma-separated user ids allowed in; the Supabase project is shared with another app |
+| `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` | baked into the frontend build; public by design |
+| `VITE_ALLOW_SIGNUP` | `true` to show a sign-up option |
+
+On Vercel the backend refuses to start without `TALLY_DATABASE_URL` rather than
+fall back to SQLite on a read-only disk. Then `vercel deploy --prod`.
 
 ## Trying the conflict behaviour
 
@@ -121,7 +149,7 @@ python tools/check_all.py      # everything below, in order
 
 | Suite | Count | Covers |
 | --- | --- | --- |
-| `cd backend && pytest` | 27 | the protocol, every conflict path, idempotency, two-device stories |
+| `cd backend && pytest` | 48 | the protocol, every conflict path, idempotency, two-device stories, keeping accounts apart |
 | `cd frontend && npm test` | 39 | the client engine: queueing, restart durability, lost responses, compaction, resolution |
 | `python tools/smoke_test.py` | 34 | a real uvicorn process over HTTP: app shell, SPA fallback, SW and manifest headers, asset caching, push/pull |
 | `node tools/browser_check.mjs` | 34 | real Chromium: SW install, installability, offline cold start, conflict resolution end to end |
@@ -142,9 +170,10 @@ skips it if Playwright is absent.
   `smoke_test.py` and `browser_check.mjs` would notice. It also means
   **IndexedDB, the real HTTP transport and the service worker are not covered
   by the unit tests at all** — only by the browser check.
-- **`/api/demo/*` is open, unauthenticated, and writes to the live database.**
-  It exists so the conflict UI can be demonstrated from one browser. Remove it
-  or gate it behind a flag before this goes anywhere real. CORS is `*` too.
+- **`/api/demo/*` writes to the live database.** It exists so the conflict UI
+  can be demonstrated from one browser. It needs a sign-in and only touches
+  that account's entries, but it is still a way to edit them outside the app.
+  CORS is `*` too.
 - **`server_notes` is dead code.** `models.py` declares a `ServerNote` table
   whose docstring claims the demo endpoints and health checks use it. Nothing
   references it; the table is created and stays empty.
@@ -169,11 +198,11 @@ skips it if Playwright is absent.
 Decisions made without being able to ask, and what a real deployment would need
 next:
 
-- **No accounts.** Every device syncs the same single ledger. Adding auth means
-  a user id on `entries` and a filter on pull; the conflict machinery is
-  unaffected.
-- **SQLite.** Fine for one household. The only Postgres-specific change would
-  be swapping the sequence counter's `UPDATE ... RETURNING`.
+- **One ledger per account, no sharing.** Every table is keyed by `user_id`
+  first, and the pull cursor is per user. Two people can't share a household
+  ledger yet.
+- **No migrations.** Tables are created on startup if missing; a schema change
+  to an existing database has to be applied by hand.
 - **Nothing is ever purged.** Tombstones and the `entry_changes` and
   `applied_ops` logs grow forever — fine at household scale, but not a
   retention policy. Pull is a cursor scan over `entries`, 200 rows a page

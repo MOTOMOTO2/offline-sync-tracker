@@ -33,13 +33,31 @@ function finished(tx: IDBTransaction): Promise<void> {
   });
 }
 
+/** One database per account, so a second person signing in on this phone starts empty. */
+export const dbNameFor = (userId: string) => `${DB_NAME}-${userId}`;
+
 export class IdbStore implements TallyStore {
   private dbPromise: Promise<IDBDatabase> | null = null;
+
+  constructor(private readonly name = DB_NAME) {}
+
+  /** Close this store's connection and delete its database. Used on sign-out. */
+  async destroy(): Promise<void> {
+    if (this.dbPromise) (await this.dbPromise).close();
+    this.dbPromise = null;
+    await new Promise<void>((resolve, reject) => {
+      const req = indexedDB.deleteDatabase(this.name);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error ?? new Error('could not delete IndexedDB'));
+      // Another tab still has it open; it goes when that tab closes.
+      req.onblocked = () => resolve();
+    });
+  }
 
   private open(): Promise<IDBDatabase> {
     if (this.dbPromise) return this.dbPromise;
     this.dbPromise = new Promise((resolve, reject) => {
-      const req = indexedDB.open(DB_NAME, DB_VERSION);
+      const req = indexedDB.open(this.name, DB_VERSION);
       req.onupgradeneeded = () => {
         const db = req.result;
         if (!db.objectStoreNames.contains(ENTRIES)) {

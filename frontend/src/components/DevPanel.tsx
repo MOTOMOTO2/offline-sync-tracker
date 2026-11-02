@@ -1,6 +1,7 @@
 import { useState } from 'react';
 
 import { engine, transport } from '../engine';
+import { getAccessToken } from '../lib/auth';
 import { formatMoney } from '../lib/format';
 import type { LocalEntry } from '../lib/types';
 
@@ -16,9 +17,13 @@ import type { LocalEntry } from '../lib/types';
 
 async function callDemo(path: string, body: unknown): Promise<string | null> {
   try {
+    const token = await getAccessToken();
     const response = await fetch(`/api/demo/${path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
       body: JSON.stringify(body),
     });
     if (!response.ok) {

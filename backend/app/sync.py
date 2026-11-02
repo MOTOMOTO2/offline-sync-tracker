@@ -25,7 +25,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import select, update
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.orm import Session
 
 from .models import AppliedOp, Entry, EntryChange, SyncState
@@ -36,30 +37,43 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def next_seq(session: Session) -> int:
-    """Hand out the next global sequence number.
+def _bump(user_id: str):
+    return (
+        update(SyncState)
+        .where(SyncState.user_id == user_id)
+        .values(seq=SyncState.seq + 1)
+        .returning(SyncState.seq)
+    )
+
+
+def next_seq(session: Session, user_id: str) -> int:
+    """Hand out this user's next sequence number.
 
     UPDATE ... RETURNING keeps this atomic even if two devices push at the same
     moment, which matters because the sequence doubles as every client's pull
     cursor - a gap or a reuse would make a client silently miss a change.
     """
-    row = session.execute(
-        text("UPDATE sync_state SET seq = seq + 1 WHERE id = 1 RETURNING seq")
-    ).first()
-    if row is None:  # first ever write
-        session.add(SyncState(id=1, seq=1))
-        session.flush()
-        return 1
+    row = session.execute(_bump(user_id)).first()
+    if row is None:
+        # This user's first write. ON CONFLICT covers two of their devices
+        # making a first write at the same moment.
+        dialect = postgresql if session.get_bind().dialect.name == "postgresql" else sqlite
+        session.execute(
+            dialect.insert(SyncState)
+            .values(user_id=user_id, seq=0)
+            .on_conflict_do_nothing(index_elements=["user_id"])
+        )
+        row = session.execute(_bump(user_id)).one()
     return int(row[0])
 
 
-def current_seq(session: Session) -> int:
-    state = session.get(SyncState, 1)
+def current_seq(session: Session, user_id: str) -> int:
+    state = session.get(SyncState, user_id)
     return int(state.seq) if state else 0
 
 
 def _changes_since(
-    session: Session, entry_id: str, base_rev: int
+    session: Session, user_id: str, entry_id: str, base_rev: int
 ) -> tuple[set[str], bool, list[str]]:
     """What did the server do to this entry after base_rev?
 
@@ -68,7 +82,11 @@ def _changes_since(
     rows = (
         session.execute(
             select(EntryChange)
-            .where(EntryChange.entry_id == entry_id, EntryChange.rev > base_rev)
+            .where(
+                EntryChange.user_id == user_id,
+                EntryChange.entry_id == entry_id,
+                EntryChange.rev > base_rev,
+            )
             .order_by(EntryChange.rev)
         )
         .scalars()
@@ -99,6 +117,7 @@ def _record_change(
 ) -> None:
     session.add(
         EntryChange(
+            user_id=entry.user_id,
             entry_id=entry.id,
             rev=entry.rev,
             kind=kind,
@@ -164,8 +183,10 @@ def _invalid(op: Op, message: str) -> dict[str, Any]:
     }
 
 
-def apply_push(session: Session, device_id: str, ops: list[Op]) -> list[dict[str, Any]]:
-    """Apply a batch of queued client ops, in order, returning a result per op."""
+def apply_push(
+    session: Session, user_id: str, device_id: str, ops: list[Op]
+) -> list[dict[str, Any]]:
+    """Apply a batch of one user's queued ops, in order, returning a result per op."""
     results: list[dict[str, Any]] = []
 
     # The rev an entry sat at when *this batch* first touched it. A client that
@@ -178,7 +199,7 @@ def apply_push(session: Session, device_id: str, ops: list[Op]) -> list[dict[str
     blocked: set[str] = set()
 
     for op in ops:
-        prior = session.get(AppliedOp, op.op_id)
+        prior = session.get(AppliedOp, (user_id, op.op_id))
         if prior is not None:
             replay = dict(prior.result)
             replay["duplicate"] = True
@@ -204,7 +225,7 @@ def apply_push(session: Session, device_id: str, ops: list[Op]) -> list[dict[str
             results.append(_invalid(op, str(exc)))
             continue
 
-        result = _apply_one(session, device_id, op, patch, batch_origin_rev)
+        result = _apply_one(session, user_id, device_id, op, patch, batch_origin_rev)
 
         if result["status"] == "conflict":
             blocked.add(op.entry_id)
@@ -213,6 +234,7 @@ def apply_push(session: Session, device_id: str, ops: list[Op]) -> list[dict[str
             # the same answer rather than be re-judged against a moved target.
             session.add(
                 AppliedOp(
+                    user_id=user_id,
                     op_id=op.op_id,
                     device_id=device_id,
                     entry_id=op.entry_id,
@@ -228,13 +250,14 @@ def apply_push(session: Session, device_id: str, ops: list[Op]) -> list[dict[str
 
 def _apply_one(
     session: Session,
+    user_id: str,
     device_id: str,
     op: Op,
     patch: dict[str, Any],
     batch_origin_rev: dict[str, int],
 ) -> dict[str, Any]:
     now = utc_now()
-    entry = session.get(Entry, op.entry_id)
+    entry = session.get(Entry, (user_id, op.entry_id))
 
     if op.kind == "create":
         if entry is not None:
@@ -249,9 +272,10 @@ def _apply_one(
         fields = default_fields()
         fields.update(patch)
         entry = Entry(
+            user_id=user_id,
             id=op.entry_id,
             rev=1,
-            server_seq=next_seq(session),
+            server_seq=next_seq(session, user_id),
             deleted=False,
             fields=fields,
             created_at=now,
@@ -281,7 +305,9 @@ def _apply_one(
             message="client claims a revision the server never issued",
         )
 
-    server_changed, deleted_since, _devices = _changes_since(session, op.entry_id, op.base_rev)
+    server_changed, deleted_since, _devices = _changes_since(
+        session, user_id, op.entry_id, op.base_rev
+    )
 
     if op.kind == "delete":
         if entry.deleted:
@@ -299,7 +325,7 @@ def _apply_one(
             )
         entry.deleted = True
         entry.rev += 1
-        entry.server_seq = next_seq(session)
+        entry.server_seq = next_seq(session, user_id)
         entry.updated_at = now
         entry.updated_by = device_id
         session.flush()
@@ -321,7 +347,7 @@ def _apply_one(
         entry.fields = fields
         entry.deleted = False
         entry.rev += 1
-        entry.server_seq = next_seq(session)
+        entry.server_seq = next_seq(session, user_id)
         entry.updated_at = now
         entry.updated_by = device_id
         session.flush()
@@ -368,7 +394,7 @@ def _apply_one(
         fields.update(patch)
         entry.fields = fields
         entry.rev += 1
-        entry.server_seq = next_seq(session)
+        entry.server_seq = next_seq(session, user_id)
         entry.updated_at = now
         entry.updated_by = device_id
         session.flush()
@@ -385,7 +411,7 @@ def _apply_one(
     fields.update(patch)
     entry.fields = fields
     entry.rev += 1
-    entry.server_seq = next_seq(session)
+    entry.server_seq = next_seq(session, user_id)
     entry.updated_at = now
     entry.updated_by = device_id
     session.flush()
@@ -393,12 +419,12 @@ def _apply_one(
     return _ok(op, entry, "applied")
 
 
-def pull_changes(session: Session, since: int, limit: int) -> dict[str, Any]:
-    """Everything that changed after cursor ``since``, tombstones included."""
+def pull_changes(session: Session, user_id: str, since: int, limit: int) -> dict[str, Any]:
+    """Everything of this user's that changed after cursor ``since``, tombstones included."""
     rows = (
         session.execute(
             select(Entry)
-            .where(Entry.server_seq > since)
+            .where(Entry.user_id == user_id, Entry.server_seq > since)
             .order_by(Entry.server_seq)
             .limit(limit + 1)
         )

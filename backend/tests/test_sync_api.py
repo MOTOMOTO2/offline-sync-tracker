@@ -6,9 +6,9 @@ from __future__ import annotations
 def test_health_and_meta(client):
     health = client.get("/api/health").json()
     assert health["ok"] is True
-    assert health["cursor"] == 0
 
     meta = client.get("/api/meta").json()
+    assert meta["cursor"] == 0
     assert "amount_cents" in meta["fields"]
     assert "groceries" in meta["categories"]
 

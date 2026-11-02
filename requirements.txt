@@ -1,0 +1,7 @@
+# What Vercel installs for api/index.py. Keep in step with backend/requirements.txt,
+# minus uvicorn: Vercel runs the app itself. (Vercel's builder can't follow -r.)
+fastapi>=0.115
+sqlalchemy>=2.0
+pydantic>=2.7
+pyjwt[crypto]>=2.9
+psycopg[binary]>=3.2

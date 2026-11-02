@@ -17,9 +17,11 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.orm import Session
+from sqlalchemy.schema import CreateSchema
 
-from .db import SessionLocal, engine, get_session
-from .models import Base, Entry, SyncState
+from .auth import UserDep
+from .db import engine, get_session
+from .models import SCHEMA, Base, Entry
 from .schemas import (
     FIELD_SPECS,
     MAX_PULL_LIMIT,
@@ -60,40 +62,41 @@ SessionDep = Annotated[Session, Depends(get_session)]
 
 
 def init_db() -> None:
+    # Each user's sync_state row is made by their first write (see next_seq).
+    if SCHEMA:
+        with engine.begin() as conn:
+            conn.execute(CreateSchema(SCHEMA, if_not_exists=True))
     Base.metadata.create_all(bind=engine)
-    with SessionLocal() as session:
-        if session.get(SyncState, 1) is None:
-            session.add(SyncState(id=1, seq=0))
-            session.commit()
 
 
 # --------------------------------------------------------------------------
-# Sync API
+# Sync API - everything below health is one signed-in user's (see auth.py)
 # --------------------------------------------------------------------------
 
 
 @app.get("/api/health")
-def health(session: SessionDep) -> dict:
-    return {"ok": True, "server_time": utc_now(), "cursor": current_seq(session)}
+def health() -> dict:
+    # Open to anyone: the app uses it to tell "no signal" from "signed out".
+    return {"ok": True, "server_time": utc_now()}
 
 
 @app.get("/api/meta")
-def meta(session: SessionDep) -> dict:
+def meta(session: SessionDep, user_id: UserDep) -> dict:
     """Field schema + category suggestions, so the client has one source of truth."""
     return {
         "server_time": utc_now(),
-        "cursor": current_seq(session),
+        "cursor": current_seq(session, user_id),
         "fields": {name: spec.model_dump() for name, spec in FIELD_SPECS.items()},
         "categories": SUGGESTED_CATEGORIES,
     }
 
 
 @app.post("/api/sync/push")
-def sync_push(payload: PushRequest, session: SessionDep) -> dict:
-    results = apply_push(session, payload.device_id, payload.ops)
+def sync_push(payload: PushRequest, session: SessionDep, user_id: UserDep) -> dict:
+    results = apply_push(session, user_id, payload.device_id, payload.ops)
     return {
         "server_time": utc_now(),
-        "cursor": current_seq(session),
+        "cursor": current_seq(session, user_id),
         "results": results,
     }
 
@@ -101,10 +104,11 @@ def sync_push(payload: PushRequest, session: SessionDep) -> dict:
 @app.get("/api/sync/pull")
 def sync_pull(
     session: SessionDep,
+    user_id: UserDep,
     since: int = Query(default=0, ge=0),
     limit: int = Query(default=200, ge=1, le=MAX_PULL_LIMIT),
 ) -> dict:
-    return pull_changes(session, since, limit)
+    return pull_changes(session, user_id, since, limit)
 
 
 # --------------------------------------------------------------------------
@@ -117,19 +121,26 @@ def sync_pull(
 
 
 @app.get("/api/demo/entries")
-def demo_entries(session: SessionDep) -> dict:
-    rows = session.query(Entry).order_by(Entry.server_seq.desc()).limit(50).all()
+def demo_entries(session: SessionDep, user_id: UserDep) -> dict:
+    rows = (
+        session.query(Entry)
+        .filter(Entry.user_id == user_id)
+        .order_by(Entry.server_seq.desc())
+        .limit(50)
+        .all()
+    )
     return {"entries": [row.snapshot() for row in rows]}
 
 
 @app.post("/api/demo/other-device-edit")
 def demo_other_device_edit(
     session: SessionDep,
+    user_id: UserDep,
     entry_id: Annotated[str, Body(embed=True)],
     fields: Annotated[dict, Body(embed=True)],
     device_id: Annotated[str, Body(embed=True)] = "other-phone",
 ) -> dict:
-    entry = session.get(Entry, entry_id)
+    entry = session.get(Entry, (user_id, entry_id))
     if entry is None:
         raise HTTPException(status_code=404, detail="unknown entry")
     try:
@@ -140,32 +151,33 @@ def demo_other_device_edit(
         raise HTTPException(status_code=422, detail="no fields given")
 
     op = Op(
-        op_id=f"demo-{entry_id}-{entry.rev}-{next_seq(session)}",
+        op_id=f"demo-{entry_id}-{entry.rev}-{next_seq(session, user_id)}",
         entry_id=entry_id,
         kind="update",
         base_rev=entry.rev,
         fields=patch,
     )
-    results = apply_push(session, device_id, [op])
+    results = apply_push(session, user_id, device_id, [op])
     return {"result": results[0]}
 
 
 @app.post("/api/demo/other-device-delete")
 def demo_other_device_delete(
     session: SessionDep,
+    user_id: UserDep,
     entry_id: Annotated[str, Body(embed=True)],
     device_id: Annotated[str, Body(embed=True)] = "other-phone",
 ) -> dict:
-    entry = session.get(Entry, entry_id)
+    entry = session.get(Entry, (user_id, entry_id))
     if entry is None:
         raise HTTPException(status_code=404, detail="unknown entry")
     op = Op(
-        op_id=f"demo-del-{entry_id}-{entry.rev}-{next_seq(session)}",
+        op_id=f"demo-del-{entry_id}-{entry.rev}-{next_seq(session, user_id)}",
         entry_id=entry_id,
         kind="delete",
         base_rev=entry.rev,
     )
-    results = apply_push(session, device_id, [op])
+    results = apply_push(session, user_id, device_id, [op])
     return {"result": results[0]}
 
 
