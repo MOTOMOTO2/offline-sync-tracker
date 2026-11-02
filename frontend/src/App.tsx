@@ -1,18 +1,22 @@
 import { useEffect, useState } from 'react';
 import type { Session } from '@supabase/supabase-js';
 
-import { Banks } from './components/Banks';
 import { ConflictList } from './components/ConflictList';
 import { DevPanel } from './components/DevPanel';
 import { EntryForm } from './components/EntryForm';
 import { EntryList } from './components/EntryList';
 import { InstallBanner, UpdateToast } from './components/InstallBanner';
+import { MoneyView } from './components/MoneyView';
 import { SignIn } from './components/SignIn';
+import { SpendingView } from './components/SpendingView';
+import { SubscriptionsView } from './components/SubscriptionsView';
 import { SyncBar } from './components/SyncBar';
+import { TabBar, type Tab, initialTab, rememberTab } from './components/TabBar';
 import { bootstrap, engine, forgetThisDevice } from './engine';
+import { useBankSync } from './hooks/useBankSync';
 import { useEngineSnapshot } from './hooks/useEngineSnapshot';
 import { authConfigured, currentSession, onSessionChange, supabase } from './lib/auth';
-import { forgetSubscriptions } from './lib/bank';
+import { forgetBankCache } from './lib/bank';
 import { formatMoney, todayISO } from './lib/format';
 import { monthTotal } from './lib/materialize';
 
@@ -61,6 +65,14 @@ function Ledger({ userId, email }: { userId: string; email: string }) {
 
 function LedgerView({ userId, email }: { userId: string; email: string }) {
   const snapshot = useEngineSnapshot();
+  const [tab, setTab] = useState<Tab>(initialTab);
+  useBankSync(userId);
+
+  const choose = (next: Tab) => {
+    setTab(next);
+    rememberTab(next);
+    window.scrollTo({ top: 0 });
+  };
 
   const signOut = async () => {
     const { pending } = engine.getSnapshot().sync;
@@ -74,7 +86,7 @@ function LedgerView({ userId, email }: { userId: string; email: string }) {
       return;
     }
     await forgetThisDevice();
-    forgetSubscriptions(userId);
+    forgetBankCache(userId);
     // 'local' works with no signal: it ends the session on this device only.
     await supabase?.auth.signOut({ scope: 'local' });
     window.location.reload();
@@ -100,26 +112,33 @@ function LedgerView({ userId, email }: { userId: string; email: string }) {
       <main>
         <InstallBanner />
 
-        <section className="composer" aria-label="Add an expense">
-          <EntryForm />
-        </section>
+        {tab === 'expenses' && (
+          <>
+            <section className="composer" aria-label="Add an expense">
+              <EntryForm />
+            </section>
 
-        <ConflictList conflicts={snapshot.conflicts} />
+            <ConflictList conflicts={snapshot.conflicts} />
 
-        <section aria-label="Expenses">
-          <EntryList entries={snapshot.visible} />
-        </section>
+            <section aria-label="Expenses">
+              <EntryList entries={snapshot.visible} />
+            </section>
 
-        <Banks userId={userId} />
-
-        <DevPanel entries={snapshot.entries} />
+            <DevPanel entries={snapshot.entries} />
+          </>
+        )}
+        {tab === 'spending' && <SpendingView entries={snapshot.entries} />}
+        {tab === 'subscriptions' && <SubscriptionsView userId={userId} />}
+        {tab === 'money' && <MoneyView userId={userId} />}
       </main>
 
       <footer className="app-footer">
-        <p>
-          Everything is stored on this device first. Syncing is something that happens
-          afterwards, when there is a connection.
-        </p>
+        {tab === 'expenses' && (
+          <p>
+            Everything is stored on this device first. Syncing is something that happens
+            afterwards, when there is a connection.
+          </p>
+        )}
         <p className="account">
           Signed in as {email}.{' '}
           <button type="button" className="link" onClick={signOut}>
@@ -127,6 +146,8 @@ function LedgerView({ userId, email }: { userId: string; email: string }) {
           </button>
         </p>
       </footer>
+
+      <TabBar tab={tab} onChange={choose} conflicts={snapshot.conflicts.length} />
     </div>
   );
 }

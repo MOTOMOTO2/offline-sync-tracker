@@ -121,6 +121,10 @@ class PlaidClient:
             body["cursor"] = cursor
         return self.call("/transactions/sync", body)
 
+    def accounts_get(self, access_token: str) -> list[dict]:
+        """Accounts with the balances Plaid last saw (cached, so free to ask for)."""
+        return self.call("/accounts/get", {"access_token": access_token})["accounts"]
+
     def transactions_recurring_get(self, access_token: str) -> dict:
         return self.call("/transactions/recurring/get", {"access_token": access_token})
 

@@ -5,7 +5,17 @@ import type { FieldName, Fields } from './types';
 export function formatMoney(cents: number): string {
   const sign = cents < 0 ? '-' : '';
   const abs = Math.abs(cents);
-  return `${sign}$${(abs / 100).toFixed(2)}`;
+  const amount = (abs / 100).toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  return `${sign}$${amount}`;
+}
+
+/** Whole dollars, for headline numbers where cents are noise. */
+export function formatMoneyWhole(cents: number): string {
+  const sign = cents < 0 ? '-' : '';
+  return `${sign}$${Math.round(Math.abs(cents) / 100).toLocaleString('en-US')}`;
 }
 
 export function parseMoney(input: string): number | null {

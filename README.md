@@ -105,6 +105,13 @@ usual. The rules are in `backend/app/banking.py`:
 - **Subscriptions** come from Plaid's recurring-transactions product when the
   account has it, and otherwise from the ledger itself: the same merchant at
   a steady price and gap.
+- **Balances** (the Money tab) are the ones Plaid sends with each sync. A
+  credit card or loan's balance counts as owed, anything else as yours.
+
+The app has four tabs: Expenses (the ledger), Spending (each month by
+category, worked out on the device so it works offline), Subscriptions (by
+next renewal) and Money (have vs owe, accounts, connected banks). Balances
+and subscriptions are cached on the device for showing with no signal.
 
 ## Trying the conflict behaviour
 
@@ -177,7 +184,7 @@ python tools/check_all.py      # everything below, in order
 
 | Suite | Count | Covers |
 | --- | --- | --- |
-| `cd backend && pytest` | 73 | the protocol, every conflict path, idempotency, two-device stories, keeping accounts apart, bank import and webhooks |
+| `cd backend && pytest` | 76 | the protocol, every conflict path, idempotency, two-device stories, keeping accounts apart, bank import and webhooks |
 | `cd frontend && npm test` | 39 | the client engine: queueing, restart durability, lost responses, compaction, resolution |
 | `python tools/smoke_test.py` | 34 | a real uvicorn process over HTTP: app shell, SPA fallback, SW and manifest headers, asset caching, push/pull |
 | `node tools/browser_check.mjs` | 34 | real Chromium: SW install, installability, offline cold start, conflict resolution end to end |

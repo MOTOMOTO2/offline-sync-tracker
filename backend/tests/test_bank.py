@@ -428,3 +428,62 @@ def test_detection_wants_a_steady_gap_and_a_steady_price():
     assert [(s["merchant"], s["frequency"], s["next_date"]) for s in found] == [
         ("netflix com", "monthly", "2026-11-11")
     ]
+
+
+# -- balances and finer categories ---------------------------------------------------
+
+
+def test_balances_split_what_you_have_from_what_you_owe(client, plaid):
+    plaid.queue()
+    plaid.pages[0]["accounts"] = [
+        {"account_id": "chq", "name": "Chequing", "mask": "1111", "type": "depository",
+         "subtype": "checking", "balances": {"current": 2500.10, "available": 2400, "iso_currency_code": "CAD"}},
+        {"account_id": "sav", "name": "Savings", "mask": "2222", "type": "depository",
+         "subtype": "savings", "balances": {"current": 1000, "iso_currency_code": "CAD"}},
+        {"account_id": "visa", "name": "Visa", "mask": "3333", "type": "credit",
+         "subtype": "credit card", "balances": {"current": 640.55, "limit": 5000, "iso_currency_code": "CAD"}},
+        {"account_id": "loan", "name": "Car loan", "mask": "4444", "type": "loan",
+         "subtype": "auto", "balances": {"current": 9000, "iso_currency_code": "CAD"}},
+    ]
+    connect(client, institution="Scotiabank")
+
+    body = client.get("/api/bank/balances").json()
+    assert body["totals"] == [{"currency": "CAD", "have_cents": 350010, "owe_cents": 964055,
+                               "net_cents": 350010 - 964055}]
+    visa = next(a for a in body["accounts"] if a["mask"] == "3333")
+    assert (visa["owed"], visa["current_cents"], visa["limit_cents"]) == (True, 64055, 500000)
+    assert client.get("/api/bank/balances", headers=auth(USER_B)).json() == {"accounts": [], "totals": []}
+
+
+def test_balances_come_from_accounts_get_when_sync_sends_none(client, plaid):
+    plaid.accounts_get = lambda token: [
+        {"account_id": "chq", "name": "Chequing", "mask": "1111", "type": "depository",
+         "balances": {"current": 12.34, "iso_currency_code": "CAD"}},
+    ]
+    connect(client)  # FakePlaid's empty page carries no accounts
+    assert client.get("/api/bank/balances").json()["totals"][0]["have_cents"] == 1234
+
+
+def test_reading_from_the_start_resorts_categories_nobody_chose(client, plaid, phone):
+    shop = txn("t1", 30.0, "2026-10-01", merchant="Winners", primary="GENERAL_MERCHANDISE")
+    kept = txn("t2", 20.0, "2026-10-02", merchant="Shoppers", primary="PERSONAL_CARE")
+    plaid.queue(added=[shop, kept])
+    connect(client)
+    entries = live(phone.pull())
+    # Imported under the old, coarser rules, and one re-sorted by hand since.
+    from app.db import SessionLocal
+
+    with SessionLocal() as session:
+        for entry_id in ("plaid-t1", "plaid-t2"):
+            entry = session.get(Entry, ("11111111-1111-1111-1111-111111111111", entry_id))
+            entry.fields = {**entry.fields, "category": "other"}
+        session.commit()
+    phone.update("plaid-t2", entries["plaid-t2"]["rev"], category="health")
+
+    plaid.queue(added=[shop, kept])
+    response = client.post("/api/bank/refresh", json={"from_start": True})
+    assert response.status_code == 200
+
+    entries = live(phone.pull())
+    assert entries["plaid-t1"]["fields"]["category"] == "shopping"
+    assert entries["plaid-t2"]["fields"]["category"] == "health"

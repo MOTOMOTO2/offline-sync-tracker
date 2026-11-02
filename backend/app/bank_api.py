@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 from .auth import UserDep
 from .banking import (
     BankNotConfigured,
+    balance_sheet,
     detect_recurring,
     plaid_recurring,
     seal,
@@ -184,17 +185,21 @@ def refresh(
     user_id: UserDep,
     plaid: PlaidDep,
     force: Annotated[bool, Body(embed=True)] = False,
+    from_start: Annotated[bool, Body(embed=True)] = False,
 ) -> dict:
-    """Pull in anything new from every connected bank. A failing bank doesn't stop the others."""
+    """Pull in anything new from every connected bank. A failing bank doesn't stop the others.
+
+    ``from_start`` re-reads each bank's whole history (see ``sync_item``).
+    """
     totals = {"added": 0, "matched": 0, "updated": 0, "removed": 0}
     now = utc_now()
     for item in _items(session, user_id):
         if item.status == "revoked":
             continue
-        if not force and item.last_synced_at and _seconds_between(item.last_synced_at, now) < REFRESH_AFTER_S:
+        if not (force or from_start) and item.last_synced_at and _seconds_between(item.last_synced_at, now) < REFRESH_AFTER_S:
             continue
         try:
-            counts = sync_item(session, plaid, item)
+            counts = sync_item(session, plaid, item, from_start=from_start)
         except PlaidError as exc:
             log.warning("refresh of %s: %s", item.item_id, exc)
             continue
@@ -208,6 +213,12 @@ def _seconds_between(earlier: str, later: str) -> float:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
     return (parse(later) - parse(earlier)).total_seconds()
+
+
+@router.get("/balances")
+def balances(session: SessionDep, user_id: UserDep) -> dict:
+    """What you have and what you owe, from each bank's last sync."""
+    return balance_sheet([item for item in _items(session, user_id) if item.status != "revoked"])
 
 
 @router.delete("/items/{item_id}")

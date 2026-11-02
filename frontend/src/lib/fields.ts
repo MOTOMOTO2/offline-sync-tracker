@@ -20,11 +20,16 @@ export const DEFAULT_FIELDS: Fields = {
 export const CATEGORIES = [
   'groceries',
   'eating out',
+  'shopping',
   'transport',
+  'travel',
   'bills',
   'health',
+  'personal care',
   'fun',
   'home',
+  'services',
+  'fees',
   'other',
 ] as const;
 

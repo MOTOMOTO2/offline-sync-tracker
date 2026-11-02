@@ -19,6 +19,10 @@
   --red: #f87171;
   --orange: #fb923c;
   --radius: 14px;
+  /* Chart colours, checked for colour-blind separation on --surface. */
+  --have: #3987e5;
+  --owe: #d95926;
+  --meter: #3987e5;
   --tap: 44px;
 }
 
@@ -112,7 +116,7 @@ code {
 .app {
   max-width: 640px;
   margin: 0 auto;
-  padding: 0 0 env(safe-area-inset-bottom);
+  padding: 0 0 calc(76px + env(safe-area-inset-bottom));
   min-height: 100dvh;
 }
 
@@ -893,47 +897,7 @@ button:focus-visible {
   flex-wrap: wrap;
 }
 
-.panel-toggle {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  width: 100%;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  padding: 0;
-  text-align: left;
-}
-
-.panel-toggle > span:first-child {
-  display: flex;
-  flex-direction: column;
-}
-
-.panel-toggle .section-title {
-  margin: 0;
-}
-
-.panel-toggle small {
-  font-size: 0.8rem;
-}
-
-.subs-total {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-}
-
-.subs-total small {
-  font-weight: 400;
-  font-size: 0.72rem;
-  color: var(--muted);
-}
-
-.bank-list,
-.subs-list {
+.bank-list {
   list-style: none;
   margin: 0;
   padding: 0;
@@ -942,8 +906,7 @@ button:focus-visible {
   gap: 8px;
 }
 
-.bank-item,
-.sub-item {
+.bank-item {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -983,4 +946,410 @@ button:focus-visible {
 .entry-bank {
   color: var(--indigo) !important;
   font-size: 0.74rem !important;
+}
+
+/* ---------- tabs ---------- */
+
+.tab-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 30;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
+  background: color-mix(in srgb, var(--bg) 90%, transparent);
+  backdrop-filter: blur(14px);
+  border-top: 1px solid var(--border);
+}
+
+.tab {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  min-height: 52px;
+  padding: 6px 0 4px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.68rem;
+  letter-spacing: 0.01em;
+}
+
+.tab.is-active {
+  color: var(--text);
+}
+
+.tab.is-active svg {
+  color: var(--indigo);
+}
+
+.tab-dot {
+  position: absolute;
+  top: 6px;
+  left: calc(50% + 9px);
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--orange);
+}
+
+/* ---------- views ---------- */
+
+.view {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.hero {
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 20px 18px 18px;
+  background:
+    radial-gradient(120% 90% at 0% 0%, color-mix(in srgb, var(--indigo) 22%, transparent), transparent 60%),
+    var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.hero-label {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.hero-number {
+  margin: 0;
+  font-size: 2.4rem;
+  line-height: 1.1;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.hero-number small {
+  font-size: 1rem;
+  font-weight: 500;
+  color: var(--muted);
+  letter-spacing: 0;
+}
+
+.hero-sub {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.hero-foot {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.hero-empty p:last-child {
+  margin: 0;
+}
+
+.month-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: -8px -8px 0;
+}
+
+button.icon {
+  min-width: var(--tap);
+  padding: 0;
+  border: 0;
+  font-size: 1.5rem;
+  line-height: 1;
+  color: var(--muted);
+}
+
+.stat-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+
+.stat-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.stat-value {
+  font-weight: 650;
+  font-size: 1.05rem;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex: none;
+}
+
+.swatch.split-have,
+.split-part.split-have {
+  background: var(--have);
+}
+
+.swatch.split-owe,
+.split-part.split-owe {
+  background: var(--owe);
+}
+
+.split {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.split-bar {
+  display: flex;
+  gap: 2px;
+  height: 10px;
+}
+
+.split-part {
+  flex-basis: 0;
+  min-width: 4px;
+}
+
+.split-part:first-child {
+  border-radius: 5px 0 0 5px;
+}
+
+.split-part:last-child {
+  border-radius: 0 5px 5px 0;
+}
+
+.split-part:only-child {
+  border-radius: 5px;
+}
+
+.legend {
+  display: flex;
+  gap: 14px;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.legend span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.group-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin: 0 4px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.group-head .small {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+}
+
+.group-total {
+  color: var(--text);
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.card-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.card-list > li + li {
+  border-top: 1px solid var(--border);
+}
+
+.account-row,
+.sub-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+}
+
+.account-row .bank-text,
+.sub-row .bank-text {
+  flex: 1;
+}
+
+.account-balance {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.account-balance.is-owed {
+  color: var(--muted);
+}
+
+/* spending */
+
+.category-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  padding: 12px 14px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  text-align: left;
+}
+
+.category-row:hover,
+.category.is-open .category-row {
+  background: var(--surface-2);
+}
+
+.category-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.category-name {
+  text-transform: capitalize;
+  font-weight: 550;
+}
+
+.category-amount {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.category-amount small {
+  margin-left: 8px;
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 0.78rem;
+}
+
+.meter {
+  display: block;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+
+.meter-fill {
+  display: block;
+  height: 100%;
+  min-width: 4px;
+  border-radius: 3px;
+  background: var(--meter);
+  transition: width 240ms ease;
+}
+
+.merchant-list {
+  list-style: none;
+  margin: 0;
+  padding: 2px 14px 12px;
+  background: var(--surface-2);
+  font-size: 0.88rem;
+}
+
+.merchant-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 0;
+  border-top: 1px dashed var(--border);
+  font-variant-numeric: tabular-nums;
+}
+
+.merchant-list li span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* subscriptions */
+
+.avatar {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  flex: none;
+  border-radius: 11px;
+  background: var(--surface-3);
+  color: var(--text);
+  font-weight: 700;
+}
+
+.renews {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  white-space: nowrap;
+  font-size: 0.9rem;
+}
+
+.renews small {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.renews small.soon {
+  color: var(--amber);
+}
+
+.footnote {
+  margin: 0 4px;
 }

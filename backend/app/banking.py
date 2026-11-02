@@ -36,7 +36,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import BankItem, BankTransaction, Entry
+from .models import BankItem, BankTransaction, Entry, EntryChange
 from .plaid import PlaidClient, PlaidError
 from .schemas import Op
 from .sync import apply_push, utc_now
@@ -51,13 +51,16 @@ SKIPPED_DETAILED = {"LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"}
 CATEGORY_BY_PRIMARY = {
     "FOOD_AND_DRINK": "eating out",
     "TRANSPORTATION": "transport",
-    "TRAVEL": "transport",
+    "TRAVEL": "travel",
+    "GENERAL_MERCHANDISE": "shopping",
     "RENT_AND_UTILITIES": "bills",
     "LOAN_PAYMENTS": "bills",
-    "BANK_FEES": "bills",
+    "BANK_FEES": "fees",
     "MEDICAL": "health",
+    "PERSONAL_CARE": "personal care",
     "ENTERTAINMENT": "fun",
     "HOME_IMPROVEMENT": "home",
+    "GENERAL_SERVICES": "services",
 }
 
 # Logins Plaid can't read until their owner signs in again through Link.
@@ -184,6 +187,16 @@ class _Candidates:
         return best[1]
 
 
+def _person_chose_category(session: Session, user_id: str, entry_id: str) -> bool:
+    """Whether anyone but the import ever set this entry's category."""
+    rows = session.execute(
+        select(EntryChange.device_id, EntryChange.changed_fields).where(
+            EntryChange.user_id == user_id, EntryChange.entry_id == entry_id
+        )
+    )
+    return any(device != BANK_DEVICE and "category" in (fields or []) for device, fields in rows)
+
+
 # -- one page of /transactions/sync ---------------------------------------------
 
 
@@ -246,6 +259,11 @@ def apply_page(
                 for name, value in (("amount_cents", cents(txn)), ("occurred_on", spent_on(txn)))
                 if (entry.fields or {}).get(name) != value
             }
+            category = category_for(txn)
+            if (entry.fields or {}).get("category") != category and not _person_chose_category(
+                session, user_id, entry.id
+            ):
+                patch["category"] = category
             if patch:
                 ops.append(Op(
                     op_id=_short_id(f"pu{entry.rev}-", tid), entry_id=entry.id,
@@ -302,28 +320,94 @@ def apply_page(
     return counts
 
 
+def _to_cents(value: Any) -> int | None:
+    return None if value is None else round(float(value) * 100)
+
+
 def _remember_accounts(item: BankItem, accounts: list[dict]) -> None:
     if not accounts:
         return
     item.accounts = [
         {
             "account_id": a["account_id"],
-            "name": a.get("official_name") or a.get("name") or "",
+            "name": a.get("name") or a.get("official_name") or "",
             "mask": a.get("mask") or "",
             "type": a.get("type") or "",
             "subtype": a.get("subtype") or "",
+            "balance": {
+                "current_cents": _to_cents((a.get("balances") or {}).get("current")),
+                "available_cents": _to_cents((a.get("balances") or {}).get("available")),
+                "limit_cents": _to_cents((a.get("balances") or {}).get("limit")),
+                "currency": (a.get("balances") or {}).get("iso_currency_code")
+                or (a.get("balances") or {}).get("unofficial_currency_code")
+                or "",
+            },
         }
         for a in accounts
     ]
 
 
-def sync_item(session: Session, plaid: PlaidClient, item: BankItem) -> dict[str, int]:
-    """Bring one bank login up to date. Records a broken login on the item."""
+# Plaid account types: what's yours, and what you owe.
+OWED_TYPES = {"credit", "loan"}
+
+
+def balance_sheet(items: list[BankItem]) -> dict[str, Any]:
+    """Every account's balance, and totals of what you have and what you owe, per currency.
+
+    A credit card or loan's balance is what's owed on it; any other account's
+    is money you have. Balances are as of each bank's last sync.
+    """
+    accounts = []
+    totals: dict[str, dict[str, int]] = {}
+    for item in items:
+        for account in item.accounts or []:
+            balance = account.get("balance") or {}
+            current = balance.get("current_cents")
+            if current is None:
+                continue
+            owed = account.get("type") in OWED_TYPES
+            currency = balance.get("currency") or "CAD"
+            total = totals.setdefault(currency, {"have_cents": 0, "owe_cents": 0})
+            total["owe_cents" if owed else "have_cents"] += current
+            accounts.append({
+                "item_id": item.item_id,
+                "institution": item.institution,
+                "name": account.get("name", ""),
+                "mask": account.get("mask", ""),
+                "type": account.get("type", ""),
+                "subtype": account.get("subtype", ""),
+                "owed": owed,
+                "current_cents": current,
+                "available_cents": balance.get("available_cents"),
+                "limit_cents": balance.get("limit_cents"),
+                "currency": currency,
+                "as_of": item.last_synced_at,
+            })
+    return {
+        "accounts": accounts,
+        "totals": [
+            {"currency": c, **t, "net_cents": t["have_cents"] - t["owe_cents"]}
+            for c, t in sorted(totals.items(), key=lambda kv: -(kv[1]["have_cents"] + kv[1]["owe_cents"]))
+        ],
+    }
+
+
+def sync_item(
+    session: Session, plaid: PlaidClient, item: BankItem, *, from_start: bool = False
+) -> dict[str, int]:
+    """Bring one bank login up to date. Records a broken login on the item.
+
+    ``from_start`` reads the whole history again rather than what's new: known
+    transactions make no new entries, but pick up anything the import now does
+    differently - a finer category, say.
+    """
     totals = {"added": 0, "matched": 0, "updated": 0, "removed": 0}
     candidates = _Candidates(session, item.user_id)
     access_token = unseal(item.access_token)
-    cursor = item.cursor
+    cursor = None if from_start else item.cursor
+    start_cursor = cursor
     restarts = 0
+    saw_accounts = False
 
     while True:
         try:
@@ -332,7 +416,7 @@ def sync_item(session: Session, plaid: PlaidClient, item: BankItem) -> dict[str,
             if exc.code == "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION" and restarts < 3:
                 # Plaid's data moved under us: start again from the saved cursor.
                 restarts += 1
-                cursor = item.cursor
+                cursor = start_cursor
                 continue
             item.status = "login_required" if exc.code in LOGIN_REQUIRED_CODES else "error"
             item.status_detail = exc.message[:500]
@@ -340,6 +424,7 @@ def sync_item(session: Session, plaid: PlaidClient, item: BankItem) -> dict[str,
             raise
 
         _remember_accounts(item, page.get("accounts") or [])
+        saw_accounts = saw_accounts or bool(page.get("accounts"))
         counts = apply_page(
             session, item,
             (page.get("added") or []) + (page.get("modified") or []),
@@ -354,6 +439,11 @@ def sync_item(session: Session, plaid: PlaidClient, item: BankItem) -> dict[str,
 
     # Saved only once every page is in. A run that dies earlier starts over
     # from the old cursor, and apply_page makes the repeated pages no-ops.
+    if not saw_accounts:
+        try:
+            _remember_accounts(item, plaid.accounts_get(access_token))
+        except PlaidError:
+            pass  # balances stay as last seen; transactions are what matter here
     item.cursor = cursor
     item.status = "ok"
     item.status_detail = ""

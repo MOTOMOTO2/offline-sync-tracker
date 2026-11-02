@@ -69,13 +69,43 @@ async function api<T>(path: string, method = 'GET', body?: unknown): Promise<T> 
 
 export const bankStatus = () => api<BankStatus>('status');
 
-export const refreshBanks = (force = false) =>
-  api<{ imported: Imported; items: BankItem[] }>('refresh', 'POST', { force });
+export const refreshBanks = (force = false, fromStart = false) =>
+  api<{ imported: Imported; items: BankItem[] }>('refresh', 'POST', { force, from_start: fromStart });
 
 export const disconnectBank = (itemId: string) =>
   api<{ removed: string }>(`items/${encodeURIComponent(itemId)}`, 'DELETE');
 
 export const fetchSubscriptions = () => api<Subscriptions>('subscriptions');
+
+export interface Account {
+  item_id: string;
+  institution: string;
+  name: string;
+  mask: string;
+  type: string;
+  subtype: string;
+  /** A credit card or loan: its balance is what's owed. */
+  owed: boolean;
+  current_cents: number;
+  available_cents: number | null;
+  limit_cents: number | null;
+  currency: string;
+  as_of: string | null;
+}
+
+export interface Balances {
+  accounts: Account[];
+  totals: { currency: string; have_cents: number; owe_cents: number; net_cents: number }[];
+}
+
+export const fetchBalances = () => api<Balances>('balances');
+
+/**
+ * "The bank data changed": a bank was connected or removed, or a refresh
+ * brought something in. Views showing balances or subscriptions refetch.
+ */
+export const bankEvents = new EventTarget();
+export const announceBankChange = () => bankEvents.dispatchEvent(new Event('changed'));
 
 // -- Plaid Link ------------------------------------------------------------------
 
@@ -216,31 +246,36 @@ export function resumeLinkAfterRedirect(): Promise<LinkOutcome> | null {
   return pending ? runLink(pending, received) : null;
 }
 
-// -- subscriptions cache ------------------------------------------------------------
+// -- last answers, for showing with no signal --------------------------------------
 
-const subscriptionsKey = (userId: string) => `tally:subscriptions:${userId}`;
+type CacheKind = 'subscriptions' | 'balances';
 
-export function cachedSubscriptions(userId: string): Subscriptions | null {
+const cacheKey = (kind: CacheKind, userId: string) => `tally:${kind}:${userId}`;
+
+export function readCache<T>(kind: CacheKind, userId: string): T | null {
   try {
-    const raw = localStorage.getItem(subscriptionsKey(userId));
-    return raw ? (JSON.parse(raw) as Subscriptions) : null;
+    const raw = localStorage.getItem(cacheKey(kind, userId));
+    return raw ? (JSON.parse(raw) as T) : null;
   } catch {
     return null;
   }
 }
 
-export function forgetSubscriptions(userId: string): void {
+export function writeCache(kind: CacheKind, userId: string, value: unknown): void {
   try {
-    localStorage.removeItem(subscriptionsKey(userId));
+    localStorage.setItem(cacheKey(kind, userId), JSON.stringify(value));
   } catch {
-    /* nothing to forget */
+    /* storage full or blocked: the view just won't show offline */
   }
 }
 
-export function cacheSubscriptions(userId: string, value: Subscriptions): void {
-  try {
-    localStorage.setItem(subscriptionsKey(userId), JSON.stringify(value));
-  } catch {
-    /* storage full or blocked: the list just won't show offline */
+/** Signing out: nothing of this account's stays on the device. */
+export function forgetBankCache(userId: string): void {
+  for (const kind of ['subscriptions', 'balances'] as const) {
+    try {
+      localStorage.removeItem(cacheKey(kind, userId));
+    } catch {
+      /* nothing to forget */
+    }
   }
 }

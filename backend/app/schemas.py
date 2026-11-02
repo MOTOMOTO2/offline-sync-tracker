@@ -42,11 +42,16 @@ FIELD_SPECS: dict[str, FieldSpec] = {
 SUGGESTED_CATEGORIES = [
     "groceries",
     "eating out",
+    "shopping",
     "transport",
+    "travel",
     "bills",
     "health",
+    "personal care",
     "fun",
     "home",
+    "services",
+    "fees",
     "other",
 ]
 
