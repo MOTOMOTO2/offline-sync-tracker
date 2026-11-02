@@ -1,6 +1,15 @@
+import { useState } from 'react';
+
 import { useBankData } from '../hooks/useBankData';
-import { fetchSubscriptions, type RecurringStream, type Subscriptions } from '../lib/bank';
+import {
+  announceBankChange,
+  fetchSubscriptions,
+  removeSubscription,
+  type RecurringStream,
+  type Subscriptions,
+} from '../lib/bank';
 import { formatMoney, formatMoneyWhole, todayISO } from '../lib/format';
+import { AddSubscription } from './AddSubscription';
 
 /**
  * Repeating charges, by when they next renew. The list comes from the server:
@@ -57,6 +66,7 @@ function SubscriptionRow({ stream }: { stream: RecurringStream }) {
         <small>
           {formatMoney(stream.amount_cents)} · {FREQUENCY[stream.frequency] ?? stream.frequency}
           {stream.frequency !== 'monthly' && ` · ≈${formatMoney(stream.monthly_cents)}/mo`}
+          {stream.source === 'manual' && ' · added by you'}
         </small>
       </span>
       <span className="renews">
@@ -69,12 +79,30 @@ function SubscriptionRow({ stream }: { stream: RecurringStream }) {
           <small className="muted">last {shortDate(stream.last_date)}</small>
         )}
       </span>
+      {stream.id !== undefined && (
+        <button
+          type="button"
+          className="row-remove"
+          aria-label={`Remove ${name}`}
+          title="Remove"
+          onClick={() => {
+            if (window.confirm(`Remove ${name} from your subscriptions?`)) {
+              void removeSubscription(stream.id!).then(announceBankChange).catch(() => {
+                window.alert('Could not reach the server. Try again with a connection.');
+              });
+            }
+          }}
+        >
+          &times;
+        </button>
+      )}
     </li>
   );
 }
 
 export function SubscriptionsView({ userId }: { userId: string }) {
   const { data, loading } = useBankData<Subscriptions>('subscriptions', userId, fetchSubscriptions);
+  const [adding, setAdding] = useState(false);
   const streams = [...(data?.streams ?? [])].sort((a, b) =>
     (a.next_date ?? '9999') < (b.next_date ?? '9999') ? -1 : 1,
   );
@@ -100,7 +128,14 @@ export function SubscriptionsView({ userId }: { userId: string }) {
             {formatMoneyWhole((data.monthly_total_cents ?? 0) * 12)} a year
           </p>
         )}
+        {!adding && (
+          <button type="button" className="hero-action" onClick={() => setAdding(true)}>
+            + Add a subscription
+          </button>
+        )}
       </section>
+
+      {adding && <AddSubscription onClose={() => setAdding(false)} />}
 
       {groups.map((group) => (
         <section key={group.bucket} className="group" aria-label={group.bucket}>
@@ -130,6 +165,7 @@ export function SubscriptionsView({ userId }: { userId: string }) {
           {data.source === 'plaid'
             ? 'Found by Plaid in your bank history.'
             : 'Spotted in your ledger: the same merchant at a steady price and a steady gap.'}{' '}
+          Ones you add yourself replace a found one with the same name.{' '}
           Renewal dates are predictions from past charges; monthly figures for weekly and yearly
           charges are averages.
         </p>

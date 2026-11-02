@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 
 import { formatMoney, formatMoneyWhole, todayISO } from '../lib/format';
 import type { LocalEntry } from '../lib/types';
+import { TransferSuggestions } from './TransferSuggestions';
 
 /**
  * Where the money went, month by month. Worked out on the device from the
@@ -73,7 +74,7 @@ function Comparison({ now, before, month }: { now: number; before: number; month
   );
 }
 
-export function SpendingView({ entries }: { entries: LocalEntry[] }) {
+export function SpendingView({ entries, userId }: { entries: LocalEntry[]; userId: string }) {
   const thisMonth = todayISO().slice(0, 7);
   const [month, setMonth] = useState(thisMonth);
   const [open, setOpen] = useState<string | null>(null);
@@ -113,6 +114,8 @@ export function SpendingView({ entries }: { entries: LocalEntry[] }) {
         <p className="hero-number">{formatMoney(current.total)}</p>
         <Comparison now={current.total} before={previous.total} month={month} />
       </section>
+
+      <TransferSuggestions userId={userId} />
 
       {current.categories.length === 0 ? (
         <p className="empty muted">Nothing spent in {monthName(month)}.</p>

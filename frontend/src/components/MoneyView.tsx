@@ -2,6 +2,7 @@ import { useBankData } from '../hooks/useBankData';
 import { fetchBalances, type Account, type Balances } from '../lib/bank';
 import { formatMoney, formatMoneyWhole } from '../lib/format';
 import { Banks } from './Banks';
+import { CreditScoreCard } from './CreditScoreCard';
 import { TransferRules } from './TransferRules';
 
 /**
@@ -144,6 +145,8 @@ export function MoneyView({ userId }: { userId: string }) {
           </section>
         )
       )}
+
+      <CreditScoreCard userId={userId} />
 
       {grouped(accounts).map((group) => (
         <section key={group.key} className="group" aria-label={group.title}>

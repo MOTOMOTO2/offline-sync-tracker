@@ -179,6 +179,35 @@ class TransferRule(Base):
     created_at: Mapped[str] = mapped_column(String(32), nullable=False)
 
 
+class CustomSubscription(Base):
+    """A repeating charge someone added by hand, alongside the detected ones."""
+
+    __tablename__ = "custom_subscriptions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    amount_cents: Mapped[int] = mapped_column(Integer, nullable=False)
+    frequency: Mapped[str] = mapped_column(String(16), nullable=False)
+    # The renewal date given when it was added; later ones follow from the frequency.
+    next_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    category: Mapped[str] = mapped_column(String(40), nullable=False, default="other")
+    created_at: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
+class CreditScore(Base):
+    """A credit score someone read off their bank or credit bureau app, and when."""
+
+    __tablename__ = "credit_scores"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    score: Mapped[int] = mapped_column(Integer, nullable=False)
+    on: Mapped[str] = mapped_column(String(10), nullable=False)
+    source: Mapped[str] = mapped_column(String(40), nullable=False, default="")
+    created_at: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
 class ServerNote(Base):
     """Free-form key/value slot used by the demo endpoints and health checks."""
 

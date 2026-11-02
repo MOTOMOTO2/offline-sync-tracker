@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime
+from datetime import date, datetime, timedelta
+from typing import Literal
 from typing import Annotated
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
@@ -29,8 +30,13 @@ from .auth import UserDep
 from .banking import (
     BANK_DEVICE,
     BankNotConfigured,
+    PER_MONTH,
     apply_transfer_rule,
     balance_sheet,
+    bank_text,
+    imported_entries,
+    next_renewal,
+    reads_like_transfer,
     detect_recurring,
     plaid_recurring,
     seal,
@@ -39,7 +45,7 @@ from .banking import (
     unseal,
 )
 from .db import get_session
-from .models import BankItem, BankSeen, BankTransaction, Entry, TransferRule
+from .models import BankItem, BankSeen, BankTransaction, CustomSubscription, Entry, TransferRule
 from .plaid import PlaidClient, PlaidError, client_from_env
 from .schemas import Op
 from .sync import apply_push
@@ -238,6 +244,70 @@ def transfer_rules(session: SessionDep, user_id: UserDep) -> dict:
     return {"rules": [_rule_view(rule) for rule in rules]}
 
 
+def _pattern_for(session: Session, user_id: str, entry: Entry) -> str:
+    link = session.execute(
+        select(BankTransaction).where(
+            BankTransaction.user_id == user_id, BankTransaction.entry_id == entry.id
+        )
+    ).scalars().first()
+    if link is not None:
+        return bank_text(session, user_id, link, entry)
+    return text_key((entry.fields or {}).get("merchant", ""))
+
+
+def _brief(entry: Entry) -> dict:
+    fields = entry.fields or {}
+    return {
+        "entry_id": entry.id,
+        "merchant": fields.get("merchant", ""),
+        "amount_cents": fields.get("amount_cents", 0),
+        "occurred_on": fields.get("occurred_on", ""),
+        "bank": fields.get("bank", ""),
+    }
+
+
+@router.post("/transfer-rules/preview")
+def preview_transfer_rule(
+    session: SessionDep,
+    user_id: UserDep,
+    entry_id: Annotated[str, Body(embed=True, min_length=1, max_length=64)],
+) -> dict:
+    """What marking this expense a transfer would also take out, before anything is."""
+    entry = session.get(Entry, (user_id, entry_id))
+    if entry is None:
+        raise HTTPException(status_code=404, detail="unknown entry")
+    pattern = _pattern_for(session, user_id, entry)
+    others = [
+        _brief(other)
+        for _link, other, text in imported_entries(session, user_id)
+        if pattern and pattern in text and other.id != entry_id
+    ]
+    return {
+        "pattern": pattern,
+        "others": others,
+        "others_total_cents": sum(o["amount_cents"] for o in others),
+    }
+
+
+# How far back the transfer suggestions look.
+SUGGEST_DAYS = 90
+
+
+@router.get("/transfer-suggestions")
+def transfer_suggestions(session: SessionDep, user_id: UserDep) -> dict:
+    """Imported expenses that read like moving money ("e-Transfer", "TFR"), newest first."""
+    since = (date.today() - timedelta(days=SUGGEST_DAYS)).isoformat()
+    found = []
+    for link, entry, text in imported_entries(session, user_id):
+        seen = session.get(BankSeen, (user_id, link.transaction_id))
+        if (entry.fields or {}).get("occurred_on", "") < since:
+            continue
+        if reads_like_transfer(text, seen.category if seen else ""):
+            found.append({**_brief(entry), "description": text})
+    found.sort(key=lambda f: f["occurred_on"], reverse=True)
+    return {"suggestions": found[:30]}
+
+
 @router.post("/transfer-rules")
 def add_transfer_rule(
     session: SessionDep,
@@ -252,14 +322,8 @@ def add_transfer_rule(
     entry = session.get(Entry, (user_id, entry_id))
     if entry is None:
         raise HTTPException(status_code=404, detail="unknown entry")
-    link = session.execute(
-        select(BankTransaction).where(
-            BankTransaction.user_id == user_id, BankTransaction.entry_id == entry_id
-        )
-    ).scalars().first()
-    seen = session.get(BankSeen, (user_id, link.transaction_id)) if link else None
     merchant = (entry.fields or {}).get("merchant", "")
-    pattern = seen.text if seen and seen.text else text_key(merchant)
+    pattern = _pattern_for(session, user_id, entry)
     if not pattern:
         raise HTTPException(status_code=422, detail="this expense has no description to go by")
 
@@ -314,13 +378,63 @@ def remove_item(session: SessionDep, user_id: UserDep, plaid: PlaidDep, item_id:
     return {"removed": item_id}
 
 
+Frequency = Literal["weekly", "biweekly", "monthly", "quarterly", "annually"]
+
+
+def _custom_stream(sub: CustomSubscription) -> dict:
+    return {
+        "id": sub.id,
+        "merchant": sub.name,
+        "category": sub.category,
+        "frequency": sub.frequency,
+        "amount_cents": sub.amount_cents,
+        "monthly_cents": round(sub.amount_cents * PER_MONTH.get(sub.frequency, 0)),
+        "last_date": "",
+        "next_date": next_renewal(sub.next_date, sub.frequency),
+        "source": "manual",
+    }
+
+
+@router.post("/subscriptions/custom")
+def add_subscription(
+    session: SessionDep,
+    user_id: UserDep,
+    name: Annotated[str, Body(embed=True, min_length=1, max_length=80)],
+    amount_cents: Annotated[int, Body(embed=True, gt=0, le=100_000_000)],
+    frequency: Annotated[Frequency, Body(embed=True)],
+    next_date: Annotated[str, Body(embed=True, pattern=r"^\d{4}-\d{2}-\d{2}$")],
+    category: Annotated[str, Body(embed=True, max_length=40)] = "other",
+) -> dict:
+    try:
+        date.fromisoformat(next_date)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="next_date is not a real date") from None
+    sub = CustomSubscription(
+        user_id=user_id, name=name.strip(), amount_cents=amount_cents, frequency=frequency,
+        next_date=next_date, category=category.strip() or "other", created_at=utc_now(),
+    )
+    session.add(sub)
+    session.commit()
+    return _custom_stream(sub)
+
+
+@router.delete("/subscriptions/custom/{sub_id}")
+def remove_subscription(session: SessionDep, user_id: UserDep, sub_id: int) -> dict:
+    sub = session.get(CustomSubscription, sub_id)
+    if sub is None or sub.user_id != user_id:
+        raise HTTPException(status_code=404, detail="no such subscription")
+    session.delete(sub)
+    session.commit()
+    return {"removed": sub_id}
+
+
 @router.get("/subscriptions")
 def subscriptions(
     session: SessionDep,
     user_id: UserDep,
     plaid: Annotated[PlaidClient | None, Depends(get_plaid)],
 ) -> dict:
-    """Repeating charges: Plaid's view when it has one, else spotted in the ledger."""
+    """Repeating charges: Plaid's view when it has one, else spotted in the ledger, plus any added by hand."""
     items = [item for item in _items(session, user_id) if item.status != "revoked"]
     streams = None
     if plaid is not None and items:
@@ -337,6 +451,13 @@ def subscriptions(
         ).scalars()
         streams = detect_recurring(list(entries))
         source = "history"
+    custom = session.execute(
+        select(CustomSubscription).where(CustomSubscription.user_id == user_id)
+    ).scalars().all()
+    # Added by hand beats detected, for the same merchant.
+    yours = {text_key(sub.name) for sub in custom}
+    streams = [s for s in streams if text_key(s["merchant"]) not in yours]
+    streams += [_custom_stream(sub) for sub in custom]
     streams.sort(key=lambda s: -s["monthly_cents"])
     return {
         "source": source,

@@ -561,3 +561,107 @@ def test_a_typed_in_expense_marked_as_a_transfer_goes_too(client, plaid, phone):
     assert response.status_code == 200
     changes = {c["id"]: c for c in phone.pull()}
     assert changes["ws"]["deleted"] is True
+
+
+def test_a_preview_says_what_else_a_rule_would_take_out(client, plaid, phone):
+    plaid.queue(added=[etransfer_out("out1", 200.0, "2026-10-01"), etransfer_out("out2", 300.0, "2026-10-15"),
+                       txn("t1", 9.0, "2026-10-15", merchant="Cafe")])
+    connect(client)
+    body = client.post("/api/bank/transfer-rules/preview", json={"entry_id": "plaid-out1"}).json()
+    assert body["pattern"] == "interac e transfer send"
+    assert [o["entry_id"] for o in body["others"]] == ["plaid-out2"]
+    assert body["others_total_cents"] == 30000
+    assert "plaid-out1" in live(phone.pull())  # nothing taken out yet
+
+
+def test_suggestions_list_imported_expenses_that_read_like_transfers(client, plaid):
+    today = date.today().isoformat()
+    plaid.queue(added=[etransfer_out("out1", 200.0, today), txn("t1", 9.0, today, merchant="Cafe"),
+                       txn("t2", 75.0, today, merchant="TFR-TO 8812 SAVINGS")])
+    connect(client)
+    found = client.get("/api/bank/transfer-suggestions").json()["suggestions"]
+    assert sorted(s["entry_id"] for s in found) == ["plaid-out1", "plaid-t2"]
+    assert client.get("/api/bank/transfer-suggestions", headers=auth(USER_B)).json()["suggestions"] == []
+
+
+# -- subscriptions added by hand -------------------------------------------------------
+
+
+def test_a_subscription_added_by_hand_is_listed_and_rolls_forward(client):
+    added = client.post("/api/bank/subscriptions/custom", json={
+        "name": "Crave", "amount_cents": 2199, "frequency": "monthly", "next_date": "2020-01-31",
+        "category": "fun"})
+    assert added.status_code == 200, added.text
+    body = client.get("/api/bank/subscriptions").json()
+    crave = next(s for s in body["streams"] if s["merchant"] == "Crave")
+    assert crave["source"] == "manual" and crave["monthly_cents"] == 2199
+    assert crave["next_date"] >= date.today().isoformat()
+    assert body["monthly_total_cents"] >= 2199
+
+    assert client.get("/api/bank/subscriptions", headers=auth(USER_B)).json()["streams"] == []
+    assert client.delete(f"/api/bank/subscriptions/custom/{crave['id']}", headers=auth(USER_B)).status_code == 404
+    assert client.delete(f"/api/bank/subscriptions/custom/{crave['id']}").status_code == 200
+    assert client.get("/api/bank/subscriptions").json()["streams"] == []
+
+
+def test_a_hand_added_subscription_replaces_the_detected_one(client, phone):
+    for months_ago in (3, 2, 1):
+        day = (date.today() - timedelta(days=30 * months_ago)).isoformat()
+        phone.create(f"spot-{months_ago}", occurred_on=day, amount_cents=1199, merchant="Spotify")
+    client.post("/api/bank/subscriptions/custom", json={
+        "name": "spotify", "amount_cents": 1299, "frequency": "monthly",
+        "next_date": date.today().isoformat()})
+    streams = client.get("/api/bank/subscriptions").json()["streams"]
+    assert [(s["merchant"], s["amount_cents"], s["source"]) for s in streams] == [("spotify", 1299, "manual")]
+
+
+@pytest.mark.parametrize("bad", [
+    {"amount_cents": 0}, {"frequency": "daily"}, {"next_date": "2026-02-30"}, {"name": ""},
+])
+def test_bad_subscriptions_are_refused(client, bad):
+    body = {"name": "X", "amount_cents": 100, "frequency": "monthly", "next_date": "2026-11-01", **bad}
+    assert client.post("/api/bank/subscriptions/custom", json=body).status_code == 422
+
+
+def test_renewals_roll_forward_by_their_frequency():
+    from app.banking import next_renewal
+
+    today = date(2026, 11, 2)
+    assert next_renewal("2026-01-31", "monthly", today) == "2026-11-30"
+    assert next_renewal("2026-02-28", "monthly", today) == "2026-11-28"
+    assert next_renewal("2025-12-25", "annually", today) == "2026-12-25"
+    assert next_renewal("2026-10-26", "weekly", today) == "2026-11-02"
+    assert next_renewal("2026-12-01", "monthly", today) == "2026-12-01"
+
+
+# -- credit scores ------------------------------------------------------------------------
+
+
+def test_credit_scores_are_kept_per_account_with_card_utilisation(client, plaid):
+    plaid.queue()
+    plaid.pages[0]["accounts"] = [
+        {"account_id": "visa", "name": "Visa", "mask": "3333", "type": "credit",
+         "balances": {"current": 1250, "limit": 5000, "iso_currency_code": "CAD"}},
+        {"account_id": "mc", "name": "Mastercard", "mask": "4444", "type": "credit",
+         "balances": {"current": 250, "limit": 1000, "iso_currency_code": "CAD"}},
+    ]
+    connect(client)
+    for score, on in ((702, "2026-08-01"), (731, "2026-10-01")):
+        assert client.post("/api/credit", json={"score": score, "on": on, "source": "TransUnion"}).status_code == 200
+
+    body = client.get("/api/credit").json()
+    assert [s["score"] for s in body["scores"]] == [702, 731]
+    assert body["utilization"] == {"balance_cents": 150000, "limit_cents": 600000, "ratio": 0.25, "cards": 2}
+    assert client.get("/api/credit", headers=auth(USER_B)).json() == {"scores": [], "utilization": None}
+    first = body["scores"][0]["id"]
+    assert client.delete(f"/api/credit/{first}", headers=auth(USER_B)).status_code == 404
+    assert client.delete(f"/api/credit/{first}").status_code == 200
+
+
+@pytest.mark.parametrize("bad", [{"score": 299}, {"score": 901}, {"on": "2099-01-01"}, {"on": "nope"}])
+def test_impossible_credit_scores_are_refused(client, bad):
+    assert client.post("/api/credit", json={"score": 700, "on": "2026-10-01", **bad}).status_code == 422
+
+
+def test_credit_routes_need_a_sign_in(client):
+    assert client.get("/api/credit", headers={"Authorization": ""}).status_code == 401

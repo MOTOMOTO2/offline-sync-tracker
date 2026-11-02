@@ -8,7 +8,7 @@ import { bankEvents, readCache, writeCache } from '../lib/bank';
  * there's a connection and whenever bank data changes.
  */
 export function useBankData<T>(
-  kind: 'subscriptions' | 'balances',
+  kind: 'subscriptions' | 'balances' | 'credit',
   userId: string,
   fetcher: () => Promise<T>,
 ): { data: T | null; loading: boolean } {

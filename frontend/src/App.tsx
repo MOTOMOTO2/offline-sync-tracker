@@ -127,7 +127,7 @@ function LedgerView({ userId, email }: { userId: string; email: string }) {
             <DevPanel entries={snapshot.entries} />
           </>
         )}
-        {tab === 'spending' && <SpendingView entries={snapshot.entries} />}
+        {tab === 'spending' && <SpendingView entries={snapshot.entries} userId={userId} />}
         {tab === 'subscriptions' && <SubscriptionsView userId={userId} />}
         {tab === 'money' && <MoneyView userId={userId} />}
       </main>

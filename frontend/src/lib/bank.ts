@@ -39,6 +39,8 @@ export interface Imported {
 }
 
 export interface RecurringStream {
+  /** Only on ones added by hand: what deleting them takes. */
+  id?: number;
   merchant: string;
   category: string;
   frequency: 'weekly' | 'biweekly' | 'semi_monthly' | 'monthly' | 'quarterly' | 'annually';
@@ -46,7 +48,7 @@ export interface RecurringStream {
   monthly_cents: number;
   last_date: string;
   next_date: string | null;
-  source: 'plaid' | 'history';
+  source: 'plaid' | 'history' | 'manual';
 }
 
 export interface Subscriptions {
@@ -56,9 +58,14 @@ export interface Subscriptions {
 }
 
 async function api<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
+  return call<T>(`/api/bank/${path}`, method, body);
+}
+
+/** A signed-in request to the API; also used for credit scores. */
+export async function call<T>(url: string, method = 'GET', body?: unknown): Promise<T> {
   const token = await getAccessToken();
   return requestJson<T>(
-    `/api/bank/${path}`,
+    url,
     {
       method,
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -116,6 +123,39 @@ export const markAsTransfer = (entryId: string) =>
   api<{ rule: TransferRule; removed: number }>('transfer-rules', 'POST', { entry_id: entryId });
 
 export const removeTransferRule = (id: number) => api<{ removed: number }>(`transfer-rules/${id}`, 'DELETE');
+
+export interface ExpenseBrief {
+  entry_id: string;
+  merchant: string;
+  amount_cents: number;
+  occurred_on: string;
+  bank: string;
+}
+
+/** What else a transfer rule made from this expense would take out. */
+export const previewTransfer = (entryId: string) =>
+  api<{ pattern: string; others: ExpenseBrief[]; others_total_cents: number }>(
+    'transfer-rules/preview',
+    'POST',
+    { entry_id: entryId },
+  );
+
+export const fetchTransferSuggestions = () =>
+  api<{ suggestions: (ExpenseBrief & { description: string })[] }>('transfer-suggestions');
+
+export interface NewSubscription {
+  name: string;
+  amount_cents: number;
+  frequency: 'weekly' | 'biweekly' | 'monthly' | 'quarterly' | 'annually';
+  next_date: string;
+  category: string;
+}
+
+export const addSubscription = (sub: NewSubscription) =>
+  api<RecurringStream>('subscriptions/custom', 'POST', sub);
+
+export const removeSubscription = (id: number) =>
+  api<{ removed: number }>(`subscriptions/custom/${id}`, 'DELETE');
 
 /**
  * "The bank data changed": a bank was connected or removed, or a refresh
@@ -265,7 +305,7 @@ export function resumeLinkAfterRedirect(): Promise<LinkOutcome> | null {
 
 // -- last answers, for showing with no signal --------------------------------------
 
-type CacheKind = 'subscriptions' | 'balances';
+type CacheKind = 'subscriptions' | 'balances' | 'credit';
 
 const cacheKey = (kind: CacheKind, userId: string) => `tally:${kind}:${userId}`;
 
@@ -288,7 +328,7 @@ export function writeCache(kind: CacheKind, userId: string, value: unknown): voi
 
 /** Signing out: nothing of this account's stays on the device. */
 export function forgetBankCache(userId: string): void {
-  for (const kind of ['subscriptions', 'balances'] as const) {
+  for (const kind of ['subscriptions', 'balances', 'credit'] as const) {
     try {
       localStorage.removeItem(cacheKey(kind, userId));
     } catch {

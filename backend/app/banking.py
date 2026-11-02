@@ -292,20 +292,38 @@ def _delete_imported(session: Session, user_id: str, link: BankTransaction, op_p
               entry_id=entry.id, kind="delete", base_rev=entry.rev)
 
 
+def bank_text(session: Session, user_id: str, link: BankTransaction, entry: Entry | None) -> str:
+    """The bank's own description of an imported expense, as rules match it."""
+    seen = session.get(BankSeen, (user_id, link.transaction_id))
+    if seen is not None and seen.text:
+        return seen.text
+    # Imported before descriptions were kept: the merchant is what there is.
+    return text_key((entry.fields or {}).get("merchant", "")) if entry else ""
+
+
+def imported_entries(session: Session, user_id: str) -> list[tuple[BankTransaction, Entry, str]]:
+    """Every live expense the import made, with the bank's description of it."""
+    rows = []
+    links = session.execute(
+        select(BankTransaction).where(
+            BankTransaction.user_id == user_id, BankTransaction.matched.is_(False)
+        )
+    ).scalars()
+    for link in links:
+        entry = session.get(Entry, (user_id, link.entry_id))
+        if entry is not None and not entry.deleted:
+            rows.append((link, entry, bank_text(session, user_id, link, entry)))
+    return rows
+
+
+def reads_like_transfer(text: str, category: str = "") -> bool:
+    return _reads_like_transfer(text, category)
+
+
 def apply_transfer_rule(session: Session, user_id: str, pattern: str) -> int:
     """Take out every imported expense the new rule covers. Returns how many."""
     ops: list[Op] = []
-    links = session.execute(
-        select(BankTransaction).where(BankTransaction.user_id == user_id)
-    ).scalars().all()
-    for link in links:
-        seen = session.get(BankSeen, (user_id, link.transaction_id))
-        if seen is not None:
-            text = seen.text
-        else:
-            # Imported before descriptions were kept: the merchant is what there is.
-            entry = session.get(Entry, (user_id, link.entry_id))
-            text = text_key((entry.fields or {}).get("merchant", "")) if entry else ""
+    for link, _entry, text in imported_entries(session, user_id):
         if pattern and pattern in text:
             op = _delete_imported(session, user_id, link, "px")
             if op is not None:
@@ -634,6 +652,26 @@ def plaid_recurring(plaid: PlaidClient, items: list[BankItem]) -> list[dict[str,
                 stream.get("last_date", ""), stream.get("predicted_next_date"), "plaid",
             ))
     return streams
+
+
+def next_renewal(first: str, frequency: str, today: date | None = None) -> str:
+    """The first renewal on or after today, counting on from ``first``."""
+    today = today or date.today()
+    day = date.fromisoformat(first)
+    months = {"monthly": 1, "quarterly": 3, "annually": 12}.get(frequency)
+    step = 0
+    current = day
+    while current < today and step < 10_000:
+        step += 1
+        if months:
+            total = (day.month - 1) + months * step
+            year, month = day.year + total // 12, total % 12 + 1
+            # The 31st renews on the last day of shorter months.
+            last = (date(year + (month == 12), month % 12 + 1, 1) - timedelta(days=1)).day
+            current = date(year, month, min(day.day, last))
+        else:
+            current = day + timedelta(days=(7 if frequency == "weekly" else 14) * step)
+    return current.isoformat()
 
 
 # (frequency, typical gap in days, how many charges it takes to believe it)

@@ -111,6 +111,15 @@ usual. The rules are in `backend/app/banking.py`:
   and taken back out if it was imported before the other side arrived. For
   accounts that aren't connected, marking one bank expense as a transfer makes
   a rule from the bank's description: it, its look-alikes and future ones go.
+  The Spending tab asks about bank charges that read like transfers, and
+  before a rule is made it says what else it would catch - an e-Transfer to
+  yourself and one to a friend can be described the same way.
+- **Subscriptions can be added by hand**, and replace a detected one with
+  the same name. Their renewal date rolls forward by their frequency.
+- **Credit scores are entered by hand.** No bank or Plaid API offers a
+  consumer's score (in Canada it's Equifax and TransUnion, with no consumer
+  API), so the Money tab keeps a history of the ones you enter, next to card
+  utilisation worked out from the connected cards.
 - **Balances** (the Money tab) are the ones Plaid sends with each sync. A
   credit card or loan's balance counts as owed, anything else as yours.
 
@@ -190,7 +199,7 @@ python tools/check_all.py      # everything below, in order
 
 | Suite | Count | Covers |
 | --- | --- | --- |
-| `cd backend && pytest` | 81 | the protocol, every conflict path, idempotency, two-device stories, keeping accounts apart, bank import and webhooks |
+| `cd backend && pytest` | 96 | the protocol, every conflict path, idempotency, two-device stories, keeping accounts apart, bank import and webhooks |
 | `cd frontend && npm test` | 39 | the client engine: queueing, restart durability, lost responses, compaction, resolution |
 | `python tools/smoke_test.py` | 34 | a real uvicorn process over HTTP: app shell, SPA fallback, SW and manifest headers, asset caching, push/pull |
 | `node tools/browser_check.mjs` | 34 | real Chromium: SW install, installability, offline cold start, conflict resolution end to end |
