@@ -245,6 +245,16 @@ class _Transfers:
             ).scalars()
             if rule.pattern
         ]
+        # The banks you've connected: "WEALTHSIMPLE MSP" on a Scotiabank
+        # statement is money going to your own Wealthsimple account.
+        self.banks = {
+            text_key(item.institution)
+            for item in session.execute(select(BankItem).where(BankItem.user_id == user_id)).scalars()
+            if len(text_key(item.institution)) >= 4
+        }
+
+    def _reads_like_transfer(self, text: str, category: str) -> bool:
+        return _reads_like_transfer(text, category) or any(bank in text for bank in self.banks)
 
     def by_rule(self, text: str) -> bool:
         return any(pattern in text for pattern in self.patterns)
@@ -263,7 +273,7 @@ class _Transfers:
             for row in rows
             if row.account_id != txn.get("account_id")
             and abs((date.fromisoformat(row.on) - day).days) <= TRANSFER_WINDOW_DAYS
-            and (_reads_like_transfer(text, category) or _reads_like_transfer(row.text, row.category))
+            and (self._reads_like_transfer(text, category) or self._reads_like_transfer(row.text, row.category))
         ]
 
     def is_transfer_out(self, txn: dict) -> bool:

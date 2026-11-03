@@ -665,3 +665,25 @@ def test_impossible_credit_scores_are_refused(client, bad):
 
 def test_credit_routes_need_a_sign_in(client):
     assert client.get("/api/credit", headers={"Authorization": ""}).status_code == 401
+
+
+def test_money_pulled_by_your_other_bank_is_a_transfer_too(client, plaid, phone):
+    # Wealthsimple pulls from Scotiabank: no "transfer" on either side, but the
+    # Scotiabank side names a bank you've connected.
+    plaid.queue(added=[txn("out1", 300.0, "2026-10-10", merchant="", primary="GENERAL_SERVICES")
+                       | {"merchant_name": None, "name": "WEALTHSIMPLE MSP"}])
+    connect(client, institution="Scotiabank")
+    plaid.queue(added=[txn("in1", -300.0, "2026-10-11", merchant="", account="ws-1", primary="OTHER")
+                       | {"merchant_name": None, "name": "Deposit"}])
+    connect(client, public_token="pub-2", institution="Wealthsimple")
+    changes = {c["id"]: c for c in phone.pull()}
+    assert changes["plaid-out1"]["deleted"] is True
+
+
+def test_naming_a_bank_you_have_not_connected_proves_nothing(client, plaid, phone):
+    plaid.queue(added=[txn("out1", 300.0, "2026-10-10", merchant="", primary="GENERAL_SERVICES")
+                       | {"merchant_name": None, "name": "QUESTRADE"},
+                       txn("in1", -300.0, "2026-10-11", merchant="", account="acc-2", primary="OTHER")
+                       | {"merchant_name": None, "name": "Deposit"}])
+    connect(client, institution="Scotiabank")
+    assert "plaid-out1" in live(phone.pull())

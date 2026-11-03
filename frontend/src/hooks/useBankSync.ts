@@ -15,7 +15,7 @@ import { announceBankChange, bankStatus, refreshBanks, type Imported } from '../
 // Opening the app twice in a minute shouldn't ask the bank twice.
 const REFRESH_EVERY_MS = 2 * 60_000;
 // Bumped when the import learns something earlier imports should get too.
-const RESORT_VERSION = 'transfers-v1';
+const RESORT_VERSION = 'transfers-v2';
 
 export function changedAnything(imported: Imported | null): boolean {
   if (!imported) return false;
