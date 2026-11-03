@@ -1,7 +1,11 @@
 import { useMemo, useState } from 'react';
 
+import { useBankData } from '../hooks/useBankData';
+import { type Budget, fetchBudgets } from '../lib/budgets';
 import { formatMoney, formatMoneyWhole, todayISO } from '../lib/format';
 import type { LocalEntry } from '../lib/types';
+import { BudgetEditor } from './BudgetEditor';
+import { CashFlow } from './CashFlow';
 import { TransferSuggestions } from './TransferSuggestions';
 
 /**
@@ -78,6 +82,12 @@ export function SpendingView({ entries, userId }: { entries: LocalEntry[]; userI
   const thisMonth = todayISO().slice(0, 7);
   const [month, setMonth] = useState(thisMonth);
   const [open, setOpen] = useState<string | null>(null);
+  const [editingBudgets, setEditingBudgets] = useState(false);
+  const { data: budgetData } = useBankData<{ budgets: Budget[] }>('budgets', userId, fetchBudgets);
+  const budgets = useMemo(
+    () => new Map((budgetData?.budgets ?? []).map((b) => [b.category, b.amount_cents])),
+    [budgetData],
+  );
 
   const earliest = useMemo(() => {
     let first = thisMonth;
@@ -91,6 +101,27 @@ export function SpendingView({ entries, userId }: { entries: LocalEntry[]; userI
   const current = useMemo(() => breakdown(entries, month), [entries, month]);
   const previous = useMemo(() => breakdown(entries, shiftMonth(month, -1)), [entries, month]);
   const largest = current.categories[0]?.total ?? 0;
+
+  // Average of the three months before this one: a starting point for budgets.
+  const typical = useMemo(() => {
+    const sums = new Map<string, number>();
+    for (let i = 1; i <= 3; i += 1) {
+      for (const c of breakdown(entries, shiftMonth(thisMonth, -i)).categories) {
+        sums.set(c.name, (sums.get(c.name) ?? 0) + c.total);
+      }
+    }
+    return new Map([...sums].map(([name, total]) => [name, Math.round(total / 3)]));
+  }, [entries, thisMonth]);
+
+  // Budgeted categories with nothing spent yet still get a row.
+  const rows = useMemo(() => {
+    const list = [...current.categories];
+    for (const [name] of budgets) {
+      if (!list.some((c) => c.name === name)) list.push({ name, total: 0, count: 0, merchants: [] });
+    }
+    return list;
+  }, [current, budgets]);
+  const over = rows.filter((c) => budgets.has(c.name) && c.total > budgets.get(c.name)!).length;
 
   const go = (by: number) => {
     setMonth((m) => shiftMonth(m, by));
@@ -113,22 +144,52 @@ export function SpendingView({ entries, userId }: { entries: LocalEntry[]; userI
         </div>
         <p className="hero-number">{formatMoney(current.total)}</p>
         <Comparison now={current.total} before={previous.total} month={month} />
+        {budgets.size > 0 && (
+          <p className="hero-sub">
+            {over === 0
+              ? `All ${budgets.size} budgets on track`
+              : `${over} of ${budgets.size} ${budgets.size === 1 ? 'budget' : 'budgets'} over`}
+          </p>
+        )}
       </section>
 
       <TransferSuggestions userId={userId} />
 
-      {current.categories.length === 0 ? (
-        <p className="empty muted">Nothing spent in {monthName(month)}.</p>
+      <CashFlow entries={entries} month={month} userId={userId} />
+
+      {editingBudgets && (
+        <BudgetEditor
+          budgets={budgetData?.budgets ?? []}
+          typical={typical}
+          onClose={() => setEditingBudgets(false)}
+        />
+      )}
+
+      {rows.length === 0 ? (
+        <p className="empty muted">
+          Nothing spent in {monthName(month)}.{' '}
+          {!editingBudgets && (
+            <button type="button" className="link" onClick={() => setEditingBudgets(true)}>
+              Set budgets
+            </button>
+          )}
+        </p>
       ) : (
         <section className="group" aria-label="By category">
           <h3 className="group-head">
             <span>By category</span>
-            <span className="muted small">share of the month</span>
+            {!editingBudgets && (
+              <button type="button" className="link group-action" onClick={() => setEditingBudgets(true)}>
+                {budgets.size ? 'Edit budgets' : 'Set budgets'}
+              </button>
+            )}
           </h3>
           <ul className="card-list category-list">
-            {current.categories.map((category) => {
+            {rows.map((category) => {
               const share = current.total > 0 ? category.total / current.total : 0;
               const isOpen = open === category.name;
+              const budget = budgets.get(category.name);
+              const isOver = budget !== undefined && category.total > budget;
               return (
                 <li key={category.name} className={`category ${isOpen ? 'is-open' : ''}`}>
                   <button
@@ -142,12 +203,28 @@ export function SpendingView({ entries, userId }: { entries: LocalEntry[]; userI
                       <span className="category-name">{category.name}</span>
                       <span className="category-amount">
                         {formatMoney(category.total)}
-                        <small>{Math.round(share * 100)}%</small>
+                        {budget === undefined ? (
+                          <small>{Math.round(share * 100)}%</small>
+                        ) : (
+                          <small>of {formatMoney(budget)}</small>
+                        )}
                       </span>
                     </span>
                     <span className="meter" aria-hidden="true">
-                      <span className="meter-fill" style={{ width: `${(category.total / largest) * 100}%` }} />
+                      <span
+                        className={`meter-fill ${isOver ? 'is-over' : ''}`}
+                        style={{
+                          width: `${Math.min(1, budget !== undefined ? category.total / budget : category.total / (largest || 1)) * 100}%`,
+                        }}
+                      />
                     </span>
+                    {budget !== undefined && (
+                      <span className={`budget-note ${isOver ? 'is-over' : ''}`}>
+                        {isOver
+                          ? `⚠ Over by ${formatMoney(category.total - budget)}`
+                          : `${formatMoney(budget - category.total)} left`}
+                      </span>
+                    )}
                   </button>
                   {isOpen && (
                     <ul className="merchant-list">

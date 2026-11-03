@@ -15,7 +15,8 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const dist = join(root, 'dist');
+// A build made elsewhere (the browser check's) passes its folder.
+const dist = process.argv[2] ? resolve(process.argv[2]) : join(root, 'dist');
 const swPath = join(dist, 'sw.js');
 
 const SKIP_EXTENSIONS = ['.map'];

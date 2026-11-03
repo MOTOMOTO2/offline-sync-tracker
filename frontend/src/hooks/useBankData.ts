@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-import { bankEvents, readCache, writeCache } from '../lib/bank';
+import { bankEvents, type CacheKind, readCache, writeCache } from '../lib/bank';
 
 /**
  * Something the bank side of the server knows (balances, subscriptions):
@@ -8,7 +8,7 @@ import { bankEvents, readCache, writeCache } from '../lib/bank';
  * there's a connection and whenever bank data changes.
  */
 export function useBankData<T>(
-  kind: 'subscriptions' | 'balances' | 'credit',
+  kind: CacheKind,
   userId: string,
   fetcher: () => Promise<T>,
 ): { data: T | null; loading: boolean } {

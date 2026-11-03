@@ -127,6 +127,15 @@ usual. The rules are in `backend/app/banking.py`:
   the day before a subscription renews, from a once-a-day Vercel Cron at
   14:00 UTC, and when a new bank charge matches a subscription. Each is sent
   once; devices that have gone away are forgotten.
+- **Budgets** are monthly limits per category, shown against spending on the
+  Spending tab. Reaching 80% and going over each notify once a month,
+  checked after every push and bank import.
+- **Money in** comes from the banks: income (what Plaid calls income) is
+  counted; other money arriving is shown but not counted; moves from your
+  own connected accounts and payments onto cards are left out. The Spending
+  tab sets it against the month's spending, over six months.
+- **Leftovers:** expenses from a bank that has since been disconnected (a
+  test bank, say) are offered for removal on the Money tab.
 - **Balances** (the Money tab) are the ones Plaid sends with each sync. A
   credit card or loan's balance counts as owed, anything else as yours.
 
@@ -206,14 +215,15 @@ python tools/check_all.py      # everything below, in order
 
 | Suite | Count | Covers |
 | --- | --- | --- |
-| `cd backend && pytest` | 108 | the protocol, every conflict path, idempotency, two-device stories, keeping accounts apart, bank import and webhooks |
+| `cd backend && pytest` |  | the protocol, every conflict path, idempotency, two-device stories, keeping accounts apart, bank import and webhooks |
 | `cd frontend && npm test` | 39 | the client engine: queueing, restart durability, lost responses, compaction, resolution |
 | `python tools/smoke_test.py` | 34 | a real uvicorn process over HTTP: app shell, SPA fallback, SW and manifest headers, asset caching, push/pull |
 | `node tools/browser_check.mjs` | 34 | real Chromium: SW install, installability, offline cold start, conflict resolution end to end |
 
-The first three pass; the counts are from an actual run, not aspirations.
-The browser check predates sign-in and fails at the sign-in screen until it
-gets a test account to use. The browser
+All four pass; the counts are from an actual run, not aspirations. The
+browser check signs in for real: it builds the app against a stand-in
+Supabase project, runs the server with a throwaway signing secret, and
+starts the page with a session holding a token signed with it. The browser
 check starts its own server, writes an expense with the network off, reloads
 *while still offline*, reconnects, watches the queue drain, then drives a
 conflict through to resolution — and produces the screenshots above. It needs
@@ -229,10 +239,10 @@ skips it if Playwright is absent.
   `smoke_test.py` and `browser_check.mjs` would notice. It also means
   **IndexedDB, the real HTTP transport and the service worker are not covered
   by the unit tests at all** — only by the browser check.
-- **`/api/demo/*` writes to the live database.** It exists so the conflict UI
-  can be demonstrated from one browser. It needs a sign-in and only touches
-  that account's entries, but it is still a way to edit them outside the app.
-  CORS is `*` too.
+- **`/api/demo/*` is off unless `TALLY_DEMO=1`.** It exists so the conflict
+  UI can be demonstrated from one browser, and the "Try the sync behaviour"
+  panel only shows when it's on. The tests and checks switch it on; the
+  hosted app leaves it off. There's no CORS: the app and API share an origin.
 - **`server_notes` is dead code.** `models.py` declares a `ServerNote` table
   whose docstring claims the demo endpoints and health checks use it. Nothing
   references it; the table is created and stays empty.

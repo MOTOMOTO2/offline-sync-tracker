@@ -487,12 +487,14 @@ def apply_page(
     apply_push(session, user_id, BANK_DEVICE, ops)  # commits the link rows too
 
     if charges:
-        from .notify import notify_charges  # notify builds on this module
+        from .budgets import check_budgets_quietly  # both build on this module
+        from .notify import notify_charges
 
         try:
             notify_charges(session, user_id, charges)
         except Exception:  # noqa: BLE001 - a failed notification never fails an import
             session.rollback()
+        check_budgets_quietly(session, user_id)
     return counts
 
 
@@ -805,3 +807,70 @@ def subscription_streams(
     streams += [custom_stream(sub) for sub in custom]
     streams.sort(key=lambda s: -s["monthly_cents"])
     return source, streams
+
+
+
+# -- money coming in ----------------------------------------------------------------
+
+def money_in(session: Session, user_id: str, since: str) -> list[dict[str, Any]]:
+    """Money that arrived in your accounts since ``since``, sorted into kinds.
+
+    * ``income`` - what Plaid calls income: pay, interest, benefits, tax refunds.
+    * ``other`` - anything else arriving: an e-Transfer from a friend, a refund.
+      Shown, but not counted as income, since it's often money paid back.
+
+    Left out entirely: money moved from another of your connected accounts,
+    and payments onto a credit card or loan (that's you paying it off).
+    """
+    owed_accounts = set()
+    for item in session.execute(select(BankItem).where(BankItem.user_id == user_id)).scalars():
+        for account in item.accounts or []:
+            if account.get("type") in OWED_TYPES:
+                owed_accounts.add(account.get("account_id"))
+
+    rows = session.execute(
+        select(BankSeen).where(
+            BankSeen.user_id == user_id, BankSeen.amount_cents < 0, BankSeen.on >= since
+        )
+    ).scalars().all()
+    transfers = _Transfers(session, user_id)
+    found = []
+    for row in rows:
+        if row.account_id in owed_accounts:
+            continue
+        as_txn = {
+            "amount": row.amount_cents / 100, "date": row.on, "account_id": row.account_id,
+            "name": row.text, "personal_finance_category": {"primary": row.category},
+        }
+        if transfers.counterparts(as_txn):
+            continue
+        found.append({
+            "on": row.on,
+            "amount_cents": -row.amount_cents,
+            "description": row.text,
+            "kind": "income" if row.category == "INCOME" else "other",
+        })
+    found.sort(key=lambda f: f["on"], reverse=True)
+    return found
+
+
+# -- leftovers from disconnected banks -------------------------------------------------
+
+def orphaned_imports(session: Session, user_id: str) -> list[Entry]:
+    """Live expenses the import made for a bank that has since been disconnected.
+
+    Disconnecting forgets which transactions a bank brought in, so these are
+    the import's entries with nothing left pointing at them - test-bank
+    transactions from trying Tally out, typically.
+    """
+    linked = set(
+        session.execute(
+            select(BankTransaction.entry_id).where(BankTransaction.user_id == user_id)
+        ).scalars()
+    )
+    rows = session.execute(
+        select(Entry).where(
+            Entry.user_id == user_id, Entry.deleted.is_(False), Entry.id.like("plaid-%")
+        )
+    ).scalars()
+    return [entry for entry in rows if entry.id not in linked]

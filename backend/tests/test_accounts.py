@@ -202,3 +202,15 @@ def test_no_allowlist_means_any_signed_in_account(client, monkeypatch):
     monkeypatch.delenv("TALLY_ALLOWED_USERS", raising=False)
     bob = Device(client, "bob-phone", USER_B)
     assert client.get("/api/meta", headers=bob.headers).status_code == 200
+
+
+def test_demo_routes_are_off_unless_switched_on(client, monkeypatch):
+    monkeypatch.delenv("TALLY_DEMO")
+    assert client.get("/api/demo/entries").status_code == 404
+    assert client.post("/api/demo/other-device-edit", json={"entry_id": "x", "fields": {}}).status_code == 404
+    assert client.get("/api/meta").json()["demo"] is False
+
+
+def test_other_sites_get_no_cors_permission(client):
+    response = client.get("/api/health", headers={"Origin": "https://evil.example.com"})
+    assert "access-control-allow-origin" not in response.headers

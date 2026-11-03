@@ -3,6 +3,7 @@ import { fetchBalances, type Account, type Balances } from '../lib/bank';
 import { formatMoney, formatMoneyWhole } from '../lib/format';
 import { Banks } from './Banks';
 import { CreditScoreCard } from './CreditScoreCard';
+import { Leftovers } from './Leftovers';
 import { TransferRules } from './TransferRules';
 
 /**
@@ -145,6 +146,8 @@ export function MoneyView({ userId }: { userId: string }) {
           </section>
         )
       )}
+
+      <Leftovers userId={userId} />
 
       <CreditScoreCard userId={userId} />
 

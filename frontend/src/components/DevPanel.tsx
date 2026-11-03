@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { engine, transport } from '../engine';
 import { getAccessToken } from '../lib/auth';
+import { call } from '../lib/bank';
 import { formatMoney } from '../lib/format';
 import type { LocalEntry } from '../lib/types';
 
@@ -13,6 +14,9 @@ import type { LocalEntry } from '../lib/types';
  * server at its current head revision - exactly what a second, already-synced
  * device would do. Combined with the offline switch, that reproduces every
  * conflict path from one browser.
+ *
+ * Only shown when the server has its demo routes on (TALLY_DEMO=1); on a real
+ * ledger they're off and so is this.
  */
 
 async function callDemo(path: string, body: unknown): Promise<string | null> {
@@ -37,6 +41,14 @@ async function callDemo(path: string, body: unknown): Promise<string | null> {
 }
 
 export function DevPanel({ entries }: { entries: LocalEntry[] }) {
+  const [demo, setDemo] = useState(false);
+  useEffect(() => {
+    call<{ demo?: boolean }>('/api/meta')
+      .then((meta) => setDemo(Boolean(meta.demo)))
+      .catch(() => {
+        /* offline: stay hidden */
+      });
+  }, []);
   const [open, setOpen] = useState(false);
   const [offline, setOffline] = useState(transport.simulatedOffline);
   const [note, setNote] = useState<string | null>(null);
@@ -62,6 +74,8 @@ export function DevPanel({ entries }: { entries: LocalEntry[] }) {
     // Pull it in, unless the point of the exercise is to stay offline.
     if (!transport.simulatedOffline) void engine.sync();
   };
+
+  if (!demo) return null;
 
   return (
     <section className={`dev-panel ${open ? 'is-open' : ''}`}>

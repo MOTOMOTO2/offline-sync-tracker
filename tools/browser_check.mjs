@@ -13,7 +13,8 @@
  *     cd frontend && npm install && npx playwright install chromium
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { createHmac } from 'node:crypto';
 import { createServer } from 'node:net';
 import { existsSync, mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -22,7 +23,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const BACKEND = join(ROOT, 'backend');
-const DIST = join(ROOT, 'frontend', 'dist');
+const FRONTEND = join(ROOT, 'frontend');
 const SHOTS = join(ROOT, 'screenshots');
 
 let chromium;
@@ -86,20 +87,51 @@ async function waitFor(fn, { timeout = 15000, interval = 150, label = 'condition
 async function httpJson(url, body) {
   const response = await fetch(url, {
     method: body ? 'POST' : 'GET',
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    headers: body ? { 'Content-Type': 'application/json', ...AUTH } : AUTH,
     body: body ? JSON.stringify(body) : undefined,
   });
   return { status: response.status, body: await response.json().catch(() => null) };
 }
 
-if (!existsSync(join(DIST, 'index.html'))) {
-  console.error('frontend/dist is missing - run: cd frontend && npm run build');
+// Sign-in is real: the app is built against a stand-in Supabase project, the
+// server checks tokens signed with a throwaway secret, and the page starts with
+// a session holding one. Supabase itself is never called.
+const SUPABASE_URL = 'https://tally-browser-check.supabase.co';
+const JWT_SECRET = 'browser-check-secret-not-used-anywhere-real';
+const USER_ID = '33333333-3333-3333-3333-333333333333';
+
+function signToken() {
+  const b64 = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  const now = Math.floor(Date.now() / 1000);
+  const body = `${b64({ alg: 'HS256', typ: 'JWT' })}.${b64({
+    sub: USER_ID, aud: 'authenticated', iss: `${SUPABASE_URL}/auth/v1`, exp: now + 3600, iat: now,
+    email: 'check@example.com', role: 'authenticated',
+  })}`;
+  return `${body}.${createHmac('sha256', JWT_SECRET).update(body).digest('base64url')}`;
+}
+const TOKEN = signToken();
+const AUTH = { Authorization: `Bearer ${TOKEN}` };
+
+const DIST = mkdtempSync(join(tmpdir(), 'tally-browser-dist-'));
+const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+const build = spawnSync(npx, ['vite', 'build', '--outDir', DIST, '--emptyOutDir'], {
+  cwd: FRONTEND,
+  env: { ...process.env, VITE_SUPABASE_URL: SUPABASE_URL, VITE_SUPABASE_ANON_KEY: 'browser-check' },
+  stdio: 'pipe',
+  shell: process.platform === 'win32',
+});
+const stamp = build.status === 0
+  ? spawnSync('node', [join(FRONTEND, 'scripts', 'finalize-sw.mjs'), DIST], { stdio: 'pipe' })
+  : build;
+if (stamp.status !== 0 || !existsSync(join(DIST, 'index.html'))) {
+  console.error(`could not build the app for the check:\n${stamp.stderr}`);
   process.exit(2);
 }
 
-const python = existsSync(join(ROOT, '.venv', 'Scripts', 'python.exe'))
-  ? join(ROOT, '.venv', 'Scripts', 'python.exe')
-  : 'python';
+const python = [
+  join(ROOT, '.venv', 'Scripts', 'python.exe'), // Windows
+  join(ROOT, '.venv', 'bin', 'python'), // macOS / Linux
+].find((candidate) => existsSync(candidate)) ?? 'python';
 
 const port = await freePort();
 const base = `http://127.0.0.1:${port}`;
@@ -113,6 +145,10 @@ const server = spawn(
     env: {
       ...process.env,
       TALLY_DATABASE_URL: `sqlite+pysqlite:///${join(dbDir, 'browser.db').split('\\').join('/')}`,
+      TALLY_FRONTEND_DIST: DIST,
+      TALLY_DEMO: '1',
+      SUPABASE_URL,
+      SUPABASE_JWT_SECRET: JWT_SECRET,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   },
@@ -130,6 +166,20 @@ try {
     viewport: { width: 414, height: 896 },
     serviceWorkers: 'allow',
   });
+  const ref = new URL(SUPABASE_URL).hostname.split('.')[0];
+  await context.addInitScript(
+    ({ key, token, userId }) => {
+      if (localStorage.getItem(key)) return;
+      localStorage.setItem(key, JSON.stringify({
+        access_token: token, refresh_token: 'browser-check', token_type: 'bearer',
+        expires_in: 3600, expires_at: Math.floor(Date.now() / 1000) + 3600,
+        user: { id: userId, email: 'check@example.com', aud: 'authenticated' },
+      }));
+    },
+    { key: `sb-${ref}-auth-token`, token: TOKEN, userId: USER_ID },
+  );
+  // Nothing should reach Supabase; anything that tries gets an empty answer.
+  await context.route(/supabase\.co/, (route) => route.fulfill({ status: 200, body: '{}' }));
   const page = await context.newPage();
   page.on('pageerror', (error) => console.log(`  [page error] ${error.message}`));
 
@@ -275,8 +325,8 @@ try {
   section('conflict, end to end');
   // Read the snapshots straight out of IndexedDB so the test and the "other
   // device" are provably aiming at the same expense.
-  const stored = await page.evaluate(async () => {
-    const open = indexedDB.open('tally');
+  const stored = await page.evaluate(async (userId) => {
+    const open = indexedDB.open(`tally-${userId}`);
     const db = await new Promise((done) => {
       open.onsuccess = () => done(open.result);
     });
@@ -286,7 +336,7 @@ try {
       request.onsuccess = () => done(request.result);
     });
     return all.map((entry) => ({ id: entry.id, merchant: entry.fields.merchant }));
-  });
+  }, USER_ID);
   check('the device has server snapshots in IndexedDB', stored.length === 2);
 
   const coop = stored.find((entry) => entry.merchant === 'Coop');

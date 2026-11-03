@@ -22,7 +22,7 @@ from datetime import date, datetime, timedelta
 from typing import Literal
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
@@ -35,6 +35,8 @@ from .banking import (
     bank_text,
     custom_stream,
     imported_entries,
+    money_in,
+    orphaned_imports,
     reads_like_transfer,
     detect_recurring,
     plaid_recurring,
@@ -368,11 +370,8 @@ def remove_item(session: SessionDep, user_id: UserDep, plaid: PlaidDep, item_id:
     except PlaidError as exc:
         if exc.code != "ITEM_NOT_FOUND":
             raise _plaid_failure(exc) from None
-    session.execute(
-        delete(BankTransaction).where(
-            BankTransaction.user_id == user_id, BankTransaction.item_id == item_id
-        )
-    )
+    for table in (BankTransaction, BankSeen):
+        session.execute(delete(table).where(table.user_id == user_id, table.item_id == item_id))
     session.delete(item)
     session.commit()
     return {"removed": item_id}
@@ -427,6 +426,48 @@ def subscriptions(
         "streams": streams,
         "monthly_total_cents": sum(s["monthly_cents"] for s in streams),
     }
+
+
+@router.get("/money-in")
+def get_money_in(
+    session: SessionDep,
+    user_id: UserDep,
+    months: Annotated[int, Query(ge=1, le=24)] = 6,
+) -> dict:
+    """Money arriving, for the cash flow view: the last ``months`` calendar months."""
+    today = date.today()
+    first = date(today.year, today.month, 1)
+    for _ in range(months - 1):
+        first = (first - timedelta(days=1)).replace(day=1)
+    return {"since": first.isoformat(), "items": money_in(session, user_id, first.isoformat())}
+
+
+@router.get("/leftovers")
+def leftovers(session: SessionDep, user_id: UserDep) -> dict:
+    """Imported expenses whose bank was disconnected (test-bank ones, say)."""
+    entries = orphaned_imports(session, user_id)
+    entries.sort(key=lambda e: (e.fields or {}).get("occurred_on", ""), reverse=True)
+    return {
+        "entries": [_brief(entry) for entry in entries],
+        "total_cents": sum((e.fields or {}).get("amount_cents", 0) for e in entries),
+    }
+
+
+@router.post("/leftovers/remove")
+def remove_leftovers(
+    session: SessionDep,
+    user_id: UserDep,
+    entry_ids: Annotated[list[str], Body(embed=True, max_length=2000)],
+) -> dict:
+    """Delete the leftovers asked for - and only ones that really are leftovers."""
+    wanted = set(entry_ids)
+    ops = [
+        Op(op_id=f"lo-{entry.id}-{entry.rev}"[:64], entry_id=entry.id, kind="delete", base_rev=entry.rev)
+        for entry in orphaned_imports(session, user_id)
+        if entry.id in wanted
+    ]
+    apply_push(session, user_id, BANK_DEVICE, ops)
+    return {"removed": len(ops)}
 
 
 @router.post("/webhook", include_in_schema=False)

@@ -233,6 +233,17 @@ class NotificationSent(Base):
     at: Mapped[str] = mapped_column(String(32), nullable=False)
 
 
+class Budget(Base):
+    """A monthly spending limit for one category."""
+
+    __tablename__ = "budgets"
+
+    user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    category: Mapped[str] = mapped_column(String(40), primary_key=True)
+    amount_cents: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
 class ServerNote(Base):
     """Free-form key/value slot used by the demo endpoints and health checks."""
 

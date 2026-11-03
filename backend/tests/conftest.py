@@ -21,6 +21,7 @@ os.environ["TALLY_DATABASE_URL"] = f"sqlite+pysqlite:///{(TMP_DIR / 'test.db').a
 os.environ["SUPABASE_URL"] = "https://tally-test.supabase.co"
 os.environ["SUPABASE_JWT_SECRET"] = "test-secret-not-used-anywhere-real-0123456789"
 os.environ.pop("TALLY_DEV_USER", None)
+os.environ["TALLY_DEMO"] = "1"  # the demo routes have their own tests
 
 import jwt  # noqa: E402
 import pytest  # noqa: E402

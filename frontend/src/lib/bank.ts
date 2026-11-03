@@ -151,6 +151,20 @@ export interface NewSubscription {
   category: string;
 }
 
+export interface MoneyIn {
+  since: string;
+  items: { on: string; amount_cents: number; description: string; kind: 'income' | 'other' }[];
+}
+
+/** Money arriving over the last few months: income, and other money in. */
+export const fetchMoneyIn = () => api<MoneyIn>('money-in?months=6');
+
+export const fetchLeftovers = () =>
+  api<{ entries: ExpenseBrief[]; total_cents: number }>('leftovers');
+
+export const removeLeftovers = (entryIds: string[]) =>
+  api<{ removed: number }>('leftovers/remove', 'POST', { entry_ids: entryIds });
+
 export const addSubscription = (sub: NewSubscription) =>
   api<RecurringStream>('subscriptions/custom', 'POST', sub);
 
@@ -305,7 +319,7 @@ export function resumeLinkAfterRedirect(): Promise<LinkOutcome> | null {
 
 // -- last answers, for showing with no signal --------------------------------------
 
-type CacheKind = 'subscriptions' | 'balances' | 'credit';
+export type CacheKind = 'subscriptions' | 'balances' | 'credit' | 'budgets' | 'moneyIn';
 
 const cacheKey = (kind: CacheKind, userId: string) => `tally:${kind}:${userId}`;
 
@@ -328,7 +342,7 @@ export function writeCache(kind: CacheKind, userId: string, value: unknown): voi
 
 /** Signing out: nothing of this account's stays on the device. */
 export function forgetBankCache(userId: string): void {
-  for (const kind of ['subscriptions', 'balances', 'credit'] as const) {
+  for (const kind of ['subscriptions', 'balances', 'credit', 'budgets', 'moneyIn'] as const) {
     try {
       localStorage.removeItem(cacheKey(kind, userId));
     } catch {

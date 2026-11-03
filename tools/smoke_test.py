@@ -107,6 +107,7 @@ def main() -> int:
         # Requests without a token run as this user; sign-in itself is covered
         # by backend/tests/test_accounts.py.
         "TALLY_DEV_USER": "smoke-test",
+        "TALLY_DEMO": "1",
     }
 
     process = subprocess.Popen(

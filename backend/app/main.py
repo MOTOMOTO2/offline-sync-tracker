@@ -8,19 +8,21 @@ the installed app and its offline shell work without a second server.
 from __future__ import annotations
 
 import mimetypes
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Response
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy.schema import CreateSchema
 
 from .auth import UserDep
 from .bank_api import router as bank_router
+from .budgets import check_budgets_quietly
+from .budgets import router as budgets_router
 from .credit_api import router as credit_router
 from .notify import router as notify_router
 from .db import engine, get_session
@@ -36,7 +38,10 @@ from .schemas import (
 )
 from .sync import apply_push, current_seq, next_seq, pull_changes, utc_now
 
-FRONTEND_DIST = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+FRONTEND_DIST = Path(
+    os.environ.get("TALLY_FRONTEND_DIST")
+    or Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+)
 
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 mimetypes.add_type("text/javascript", ".js")
@@ -54,18 +59,15 @@ app = FastAPI(
     version="1.0.0",
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# No CORS: the app is served from the same origin as the API, so no other
+# site has any business calling it from a browser.
 
 SessionDep = Annotated[Session, Depends(get_session)]
 
 app.include_router(bank_router)
 app.include_router(credit_router)
 app.include_router(notify_router)
+app.include_router(budgets_router)
 
 
 def init_db() -> None:
@@ -95,12 +97,15 @@ def meta(session: SessionDep, user_id: UserDep) -> dict:
         "cursor": current_seq(session, user_id),
         "fields": {name: spec.model_dump() for name, spec in FIELD_SPECS.items()},
         "categories": SUGGESTED_CATEGORIES,
+        "demo": demo_enabled(),
     }
 
 
 @app.post("/api/sync/push")
 def sync_push(payload: PushRequest, session: SessionDep, user_id: UserDep) -> dict:
     results = apply_push(session, user_id, payload.device_id, payload.ops)
+    if payload.ops:
+        check_budgets_quietly(session, user_id)
     return {
         "server_time": utc_now(),
         "cursor": current_seq(session, user_id),
@@ -124,10 +129,25 @@ def sync_pull(
 # Conflict handling is impossible to show off with a single browser, so these
 # let the server act as "the other device" - they write straight to the current
 # head revision, exactly as a second phone that had already synced would.
+#
+# Off unless TALLY_DEMO=1: on a real ledger they're a way to change expenses
+# outside the app, and nobody needs them there.
 # --------------------------------------------------------------------------
 
 
-@app.get("/api/demo/entries")
+def demo_enabled() -> bool:
+    return os.environ.get("TALLY_DEMO") == "1"
+
+
+def require_demo() -> None:
+    if not demo_enabled():
+        raise HTTPException(status_code=404, detail="unknown API route")
+
+
+DemoDep = Depends(require_demo)
+
+
+@app.get("/api/demo/entries", dependencies=[DemoDep])
 def demo_entries(session: SessionDep, user_id: UserDep) -> dict:
     rows = (
         session.query(Entry)
@@ -139,7 +159,7 @@ def demo_entries(session: SessionDep, user_id: UserDep) -> dict:
     return {"entries": [row.snapshot() for row in rows]}
 
 
-@app.post("/api/demo/other-device-edit")
+@app.post("/api/demo/other-device-edit", dependencies=[DemoDep])
 def demo_other_device_edit(
     session: SessionDep,
     user_id: UserDep,
@@ -168,7 +188,7 @@ def demo_other_device_edit(
     return {"result": results[0]}
 
 
-@app.post("/api/demo/other-device-delete")
+@app.post("/api/demo/other-device-delete", dependencies=[DemoDep])
 def demo_other_device_delete(
     session: SessionDep,
     user_id: UserDep,
